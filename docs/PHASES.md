@@ -38,7 +38,7 @@
 - [ ] Signed firmware manifest/public-key verification
 - [ ] Encrypted NVS credential storage
 - [ ] Authenticated device identity and heartbeat
-- [ ] Remote blocklist delivery, DNS cache/concurrency and IPv6 handling
+- [x] Backend shared domain blocklist API (MongoDB storage, admin replacement, public device fetch, versioning)\n- [ ] ESP32 remote blocklist fetch/apply, bounded persistent cache and retry/backoff\n- [ ] DNS cache/concurrency and IPv6 handling
 
 ## Phase 5 — Admin/customer interfaces
 - [x] Existing admin and customer portals retained
