@@ -62,6 +62,8 @@ static bool s_ota_started = false;
 static volatile uint32_t s_dns_queries_window = 0;
 static volatile bool s_router_connected = false;
 static volatile bool s_internet_available = false;
+static volatile bool s_server_available = false;
+static volatile uint32_t s_dns_total = 0, s_dns_blocked = 0, s_dns_upstream_failures = 0;
 
 /* Provisional ESP32-C3 SuperMini mapping; verify board wiring before connecting LEDs. */
 #define CLEANNET_LED_GREEN GPIO_NUM_3
@@ -154,9 +156,11 @@ static void dns_server_task(void *arg) {
         ssize_t n = recvfrom(server, query, sizeof(query), 0, (struct sockaddr *)&client, &client_len);
         if (n < 12) continue;
         s_dns_queries_window++;
+        s_dns_total++;
         char qname[254] = {0};
         if (!get_query_name(query, (size_t)n, qname, sizeof(qname))) continue;
         if (domain_is_blocked(qname)) {
+            s_dns_blocked++;
             ESP_LOGI(TAG, "BLOCK %s", qname);
             send_nxdomain(server, query, (size_t)n, &client, client_len);
         } else {
@@ -164,9 +168,69 @@ static void dns_server_task(void *arg) {
             if (forward_dns(query, (size_t)n, reply, &reply_len)) {
                 sendto(server, reply, reply_len, 0, (struct sockaddr *)&client, client_len);
                 ESP_LOGD(TAG, "ALLOW %s", qname);
-            } else ESP_LOGW(TAG, "Upstream timeout: %s", qname);
+            } else { s_dns_upstream_failures++; ESP_LOGW(TAG, "Upstream timeout: %s", qname); }
         }
     }
+}
+
+
+static esp_err_t status_json_handler(httpd_req_t *req) {
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t info = {0};
+    esp_netif_dns_info_t dns = {0};
+    bool has_ip = sta && esp_netif_get_ip_info(sta, &info) == ESP_OK && info.ip.addr != 0;
+    bool has_dns = sta && esp_netif_get_dns_info(sta, ESP_NETIF_DNS_MAIN, &dns) == ESP_OK;
+    char ip[16]="0.0.0.0", gw[16]="0.0.0.0", mask[16]="0.0.0.0", dns_ip[16]="unavailable";
+    if (has_ip) {
+        snprintf(ip,sizeof(ip),IPSTR,IP2STR(&info.ip));
+        snprintf(gw,sizeof(gw),IPSTR,IP2STR(&info.gw));
+        snprintf(mask,sizeof(mask),IPSTR,IP2STR(&info.netmask));
+    }
+    if (has_dns && dns.ip.type == ESP_IPADDR_TYPE_V4)
+        snprintf(dns_ip,sizeof(dns_ip),IPSTR,IP2STR(&dns.ip.u_addr.ip4));
+    cJSON *j=cJSON_CreateObject();
+    cJSON_AddStringToObject(j,"wifi",s_router_connected?"Connected":"Disconnected");
+    cJSON_AddStringToObject(j,"ip",ip);
+    cJSON_AddStringToObject(j,"gateway",gw);
+    cJSON_AddStringToObject(j,"subnet",mask);
+    cJSON_AddStringToObject(j,"dhcp_dns",dns_ip);
+    cJSON_AddStringToObject(j,"internet",s_internet_available?"Online":"Offline / checking");
+    cJSON_AddStringToObject(j,"server",s_server_available?"Reachable":"Unavailable / checking");
+    cJSON_AddStringToObject(j,"dns_service",s_router_connected?"UDP port 53 active":"Waiting for Wi-Fi");
+    cJSON_AddNumberToObject(j,"dns_total",s_dns_total);
+    cJSON_AddNumberToObject(j,"dns_blocked",s_dns_blocked);
+    cJSON_AddNumberToObject(j,"dns_failures",s_dns_upstream_failures);
+    cJSON_AddStringToObject(j,"firmware",DEVICE_VERSION);
+    cJSON_AddStringToObject(j,"router_dns_instruction",has_ip ?
+        "Set this ESP32 IP as Primary DNS in router LAN DHCP DNS. Leave Secondary DNS blank." :
+        "Wait for ESP32 to connect and receive a LAN IP before changing router DNS.");
+    char *body=cJSON_PrintUnformatted(j);
+    httpd_resp_set_type(req,"application/json");
+    httpd_resp_set_hdr(req,"Cache-Control","no-store");
+    esp_err_t result=httpd_resp_sendstr(req,body?body:"{}");
+    free(body); cJSON_Delete(j); return result;
+}
+
+static esp_err_t status_page_handler(httpd_req_t *req) {
+    static const char page[] =
+      "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
+      "<meta charset='utf-8'><title>CLEANNET Status</title><style>"
+      "body{font:16px system-ui;background:#071426;color:#eef6ff;margin:0;padding:20px}"
+      "main{max-width:720px;margin:auto;background:#10233b;padding:22px;border-radius:18px}"
+      "h1{color:#42d6cf}.item{padding:12px;margin:8px 0;background:#08182a;border:1px solid #28435f;border-radius:10px;overflow-wrap:anywhere}"
+      "small{color:#9db2c9}</style></head><body><main><h1>CLEANNET Device Status</h1>"
+      "<small>Auto refresh every 5 seconds · No Serial Monitor needed</small><div id='v'>Loading…</div>"
+      "<script>async function go(){try{let r=await fetch('/api/status',{cache:'no-store'}),s=await r.json();"
+      "let rows=[['Wi-Fi',s.wifi],['Internet',s.internet],['CLEANNET Render server',s.server],['DNS service',s.dns_service],"
+      "['ESP32 LAN IP',s.ip],['Gateway',s.gateway],['Subnet mask',s.subnet],['Router DHCP DNS',s.dhcp_dns],"
+      "['DNS requests',s.dns_total],['Blocked domains',s.dns_blocked],['Upstream failures',s.dns_failures],['Firmware',s.firmware],"
+      "['Router DNS instruction',s.router_dns_instruction]];"
+      "document.getElementById('v').innerHTML=rows.map(x=>'<div class=item><b>'+x[0]+':</b> '+x[1]+'</div>').join('')"
+      "}catch(e){document.getElementById('v').textContent='Status not available yet. Stay connected to CLEANNET and reload.'}}"
+      "go();setInterval(go,5000)</script></main></body></html>";
+    httpd_resp_set_type(req,"text/html; charset=utf-8");
+    httpd_resp_set_hdr(req,"Cache-Control","no-store");
+    return httpd_resp_send(req,page,HTTPD_RESP_USE_STRLEN);
 }
 
 static esp_err_t root_handler(httpd_req_t *req) {
@@ -270,9 +334,11 @@ static void start_setup_server(void) {
     httpd_handle_t server = NULL;
     if (httpd_start(&server, &config) != ESP_OK) { ESP_LOGE(TAG, "Setup web server failed"); return; }
     httpd_uri_t root = {.uri="/", .method=HTTP_GET, .handler=root_handler};
+    httpd_uri_t status_page = {.uri="/status", .method=HTTP_GET, .handler=status_page_handler};
+    httpd_uri_t status_json = {.uri="/api/status", .method=HTTP_GET, .handler=status_json_handler};
     httpd_uri_t scan = {.uri="/api/scan", .method=HTTP_GET, .handler=scan_handler};
     httpd_uri_t connect = {.uri="/api/connect", .method=HTTP_POST, .handler=connect_handler};
-    httpd_register_uri_handler(server, &root); httpd_register_uri_handler(server, &scan);
+    httpd_register_uri_handler(server, &root); httpd_register_uri_handler(server, &status_page); httpd_register_uri_handler(server, &status_json); httpd_register_uri_handler(server, &scan);
     httpd_register_uri_handler(server, &connect);
 }
 
@@ -328,6 +394,27 @@ static void indicators_task(void *arg) {
     }
 }
 
+
+static void server_monitor_task(void *arg) {
+    (void)arg;
+    while (1) {
+        s_server_available = false;
+        if (s_router_connected && s_internet_available) {
+            esp_http_client_config_t cfg = {.url=CONFIG_CLEANNET_OTA_MANIFEST_URL,
+                .timeout_ms=12000,.crt_bundle_attach=esp_crt_bundle_attach,.buffer_size=512};
+            esp_http_client_handle_t client=esp_http_client_init(&cfg);
+            if (client) {
+                esp_err_t err=esp_http_client_perform(client);
+                int status=esp_http_client_get_status_code(client);
+                s_server_available=(err==ESP_OK && status==200);
+                ESP_LOGI(TAG,"CLEANNET server check: %s (HTTP %d)",s_server_available?"reachable":"unavailable",status);
+                esp_http_client_cleanup(client);
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+}
+
 static void internet_monitor_task(void *arg) {
     (void)arg;
     while (1) {
@@ -364,6 +451,8 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
         s_router_connected = true;
         ESP_LOGI(TAG, "Router connected. CLEANNET LAN IP: " IPSTR, IP2STR(&event->ip_info.ip));
+        ESP_LOGI(TAG, "Gateway: " IPSTR " | Subnet: " IPSTR, IP2STR(&event->ip_info.gw), IP2STR(&event->ip_info.netmask));
+        ESP_LOGI(TAG, "Set router Primary DNS to CLEANNET LAN IP: " IPSTR, IP2STR(&event->ip_info.ip));
         if (!s_dns_started) { s_dns_started = true; xTaskCreate(dns_server_task, "cleannet_dns", 6144, NULL, 5, NULL); }
         if (!s_ota_started) { s_ota_started = true; xTaskCreate(ota_task, "cleannet_ota", 8192, NULL, 4, NULL); }
     }
@@ -464,6 +553,7 @@ void app_main(void) {
     indicators_init();
     xTaskCreate(indicators_task, "cleannet_leds", 2048, NULL, 2, NULL);
     xTaskCreate(internet_monitor_task, "cleannet_netcheck", 4096, NULL, 3, NULL);
+    xTaskCreate(server_monitor_task, "cleannet_servercheck", 4096, NULL, 2, NULL);
     ESP_LOGI(TAG, "CLEANNET %s booting; upstream DNS %s; blocklist %u entries",
         DEVICE_VERSION, CONFIG_CLEANNET_UPSTREAM_DNS, (unsigned)BLOCKED_COUNT);
     s_wifi_events = xEventGroupCreate();
