@@ -1,14 +1,19 @@
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
+from pathlib import Path
 
 from fastapi import Depends, FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from fastapi.staticfiles import StaticFiles
 from pymongo.errors import DuplicateKeyError
 
 from app.config import settings
 from app.database import check_database, close_database, get_db, initialize_indexes
 from app.models import DeviceCreate
 from app.security import hash_token, new_claim_token, require_admin
+
+STATIC_DIR = Path(__file__).parent / "static"
 
 
 @asynccontextmanager
@@ -17,13 +22,12 @@ async def lifespan(_: FastAPI):
         try:
             initialize_indexes()
         except Exception:
-            # Keep process health available; /ready reports database state.
             pass
     yield
     close_database()
 
 
-app = FastAPI(title="CLEANNET API", version="0.1.0", lifespan=lifespan)
+app = FastAPI(title="CLEANNET API", version="0.2.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
@@ -31,16 +35,27 @@ app.add_middleware(
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type", "X-Admin-Key"],
 )
+app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
 
 
-@app.get("/")
-def root():
-    return {"service": "CLEANNET API", "version": "0.1.0", "docs": "/docs"}
+@app.get("/", include_in_schema=False)
+def portal_home():
+    return FileResponse(STATIC_DIR / "customer.html")
+
+
+@app.get("/admin", include_in_schema=False)
+def admin_portal():
+    return FileResponse(STATIC_DIR / "admin.html")
+
+
+@app.get("/customer", include_in_schema=False)
+def customer_portal():
+    return FileResponse(STATIC_DIR / "customer.html")
 
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "cleannet-api", "version": "0.1.0"}
+    return {"status": "ok", "service": "cleannet-api", "version": "0.2.0"}
 
 
 @app.get("/ready")
