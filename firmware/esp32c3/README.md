@@ -72,3 +72,21 @@ The device rejects non-HTTPS URLs, checks the SHA-256 digest, and only installs 
 ## Restore / recovery
 
 If Wi-Fi setup fails, reconnect to the CLEANNET setup AP and retry. If DNS filtering interrupts internet, restore the phone's DNS to Automatic. If OTA fails validation, the current firmware remains selected; rollback is enabled for an OTA image that fails to boot and is not marked valid.
+
+
+## LED status indicators (new source change)
+
+The firmware now includes these provisional indicators:
+
+| Indicator | GPIO | Meaning |
+|---|---:|---|
+| Green external LED | GPIO3 | Router Wi-Fi connected |
+| Red external LED | GPIO4 | Router connected but internet probe failed |
+| DNS activity external LED | GPIO5 | Blinks slowly at low DNS query load and faster at higher load |
+| Onboard LED | GPIO8 | System heartbeat (active-low on many SuperMini boards) |
+
+**Electrical safety:** Do not connect an external LED directly between a GPIO and GND/3V3 without a current-limiting resistor. Use a 220–330 ohm resistor in series with each external LED. Direct connection can damage the ESP32-C3 GPIO or the LED. The onboard LED is already on the module and should not receive an external series resistor.
+
+The GPIO mapping is provisional for common ESP32-C3 SuperMini variants. Check your exact board pin labels and any existing breadboard wiring before connecting. GPIO8 is reserved for the onboard LED in this firmware. No external PAIR button is assigned in this revision.
+
+The indicator source change has been pushed, but it must still pass the ESP-IDF build and be tested on the physical board before flashing.
