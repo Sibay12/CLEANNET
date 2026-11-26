@@ -21,3 +21,15 @@ services:
         sync: false
       - key: CORS_ORIGINS
         sync: false
+      - key: FIRMWARE_ENABLED
+        value: "false"
+      - key: FIRMWARE_VERSION
+        value: "0.1.0"
+      - key: FIRMWARE_CHANNEL
+        value: stable
+      - key: FIRMWARE_URL
+        sync: false
+      - key: FIRMWARE_SHA256
+        sync: false
+      - key: FIRMWARE_MIN_BATTERY
+        value: "0"
