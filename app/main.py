@@ -33,6 +33,22 @@ class ClaimInput(BaseModel):
     device_id: str = Field(min_length=4, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     claim_token: str = Field(min_length=20, max_length=200)
 
+class BlocklistUpdate(BaseModel):
+    domains: list[str] = Field(min_length=1, max_length=1000)
+
+    @classmethod
+    def _normalize_domain(cls, value: str) -> str:
+        domain = value.strip().lower().rstrip(".")
+        if len(domain) > 253 or not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}", domain):
+            raise ValueError("Invalid domain name")
+        return domain
+
+    @classmethod
+    def model_validate(cls, obj, **kwargs):
+        if isinstance(obj, dict) and isinstance(obj.get("domains"), list):
+            obj = {**obj, "domains": [cls._normalize_domain(x) if isinstance(x, str) else x for x in obj["domains"]]}
+        return super().model_validate(obj, **kwargs)
+
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
@@ -109,6 +125,34 @@ def firmware_manifest(channel: str = Query(default="stable", min_length=1, max_l
         "sha256": settings.firmware_sha256.lower(),
         "minimum_battery_percent": settings.firmware_min_battery,
     }
+
+
+@app.get("/api/blocklist")
+def get_blocklist(since: int = Query(default=0, ge=0)):
+    """Return the current shared domain blocklist for ESP32 devices."""
+    doc = get_db().blocklists.find_one({"_id": "global"}, {"_id": 0})
+    if not doc:
+        return {"version": 0, "domains": [], "updated_at": None}
+    version = int(doc.get("version", 0))
+    if since >= version:
+        return {"version": version, "not_modified": True, "domains": []}
+    return {"version": version, "not_modified": False,
+            "updated_at": doc.get("updated_at"), "domains": doc.get("domains", [])}
+
+
+@app.put("/api/admin/blocklist", dependencies=[Depends(require_admin)])
+def replace_blocklist(payload: BlocklistUpdate):
+    """Replace the shared blocklist atomically; admin-only."""
+    domains = sorted(set(payload.domains))
+    now = datetime.now(timezone.utc).isoformat()
+    current = get_db().blocklists.find_one({"_id": "global"}, {"version": 1})
+    version = int(current.get("version", 0)) + 1 if current else 1
+    get_db().blocklists.replace_one(
+        {"_id": "global"},
+        {"_id": "global", "version": version, "domains": domains, "updated_at": now},
+        upsert=True,
+    )
+    return {"ok": True, "version": version, "domain_count": len(domains), "updated_at": now}
 
 
 @app.get("/ready")
