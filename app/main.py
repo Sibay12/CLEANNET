@@ -42,7 +42,7 @@ class BlocklistUpdate(BaseModel):
         normalized = []
         for value in values:
             domain = value.strip().lower().rstrip(".")
-            if len(domain) > 253 or not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}", domain):
+            if len(domain) > 253 or not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", domain):
                 raise ValueError(f"Invalid domain name: {value}")
             normalized.append(domain)
         return normalized
@@ -67,7 +67,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
     allow_credentials=True,
-    allow_methods=["GET", "POST"],
+    allow_methods=["GET", "POST", "PUT"],
     allow_headers=["Content-Type"],
 )
 app.mount("/assets", StaticFiles(directory=STATIC_DIR), name="assets")
