@@ -4,7 +4,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     app_env: str = "development"
     mongodb_uri: str = ""
-    admin_username: str = "admin"
+    admin_username: str = ""
     admin_password: str = ""
     session_secret: str = ""
     cors_origins: str = "http://localhost:3000,http://localhost:8000"
