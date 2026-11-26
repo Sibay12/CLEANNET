@@ -52,7 +52,7 @@
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.2.1"
+#define DEVICE_VERSION "0.2.2"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
@@ -508,41 +508,109 @@ static bool version_is_newer(const char *candidate, const char *current) {
 }
 
 static bool ota_download_and_install(const char *url, const char *expected_sha) {
-    if (strncmp(url, "https://", 8) != 0 || strlen(expected_sha) != 64) return false;
-    esp_http_client_config_t cfg = {.url=url, .timeout_ms=20000, .crt_bundle_attach=esp_crt_bundle_attach,
-        .buffer_size=OTA_BUFFER_SIZE, .keep_alive_enable=true};
+    if (!url || strncmp(url, "https://", 8) != 0 || !expected_sha || strlen(expected_sha) != 64) {
+        ESP_LOGE(TAG, "OTA manifest URL or SHA-256 is invalid");
+        return false;
+    }
+
+    const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
+    if (!partition) {
+        ESP_LOGE(TAG, "No OTA update partition available");
+        return false;
+    }
+
+    esp_http_client_config_t cfg = {
+        .url = url, .timeout_ms = 45000, .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = OTA_BUFFER_SIZE, .keep_alive_enable = true
+    };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     if (!client) return false;
-    if (esp_http_client_open(client, 0) != ESP_OK) { esp_http_client_cleanup(client); return false; }
+
+    esp_err_t err = esp_http_client_open(client, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA binary connection failed: %s", esp_err_to_name(err));
+        esp_http_client_cleanup(client);
+        return false;
+    }
+
     int content_length = esp_http_client_fetch_headers(client);
-    if (esp_http_client_get_status_code(client) != 200 || content_length <= 0) {
-        esp_http_client_close(client); esp_http_client_cleanup(client); return false;
+    int status = esp_http_client_get_status_code(client);
+    if (status != 200 || content_length > (int)partition->size) {
+        ESP_LOGE(TAG, "OTA binary HTTP %d or invalid size %d (partition %u)",
+            status, content_length, (unsigned)partition->size);
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
     }
-    const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
-    if (!partition || (size_t)content_length > partition->size) {
-        ESP_LOGE(TAG, "OTA image does not fit target partition"); esp_http_client_close(client); esp_http_client_cleanup(client); return false;
-    }
+
     esp_ota_handle_t handle = 0;
-    if (esp_ota_begin(partition, content_length, &handle) != ESP_OK) {
-        esp_http_client_close(client); esp_http_client_cleanup(client); return false;
+    if (esp_ota_begin(partition, OTA_SIZE_UNKNOWN, &handle) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not begin OTA write");
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+        return false;
     }
-    mbedtls_sha256_context sha; mbedtls_sha256_init(&sha); mbedtls_sha256_starts(&sha, 0);
-    uint8_t buffer[OTA_BUFFER_SIZE], digest[32]; int total = 0; bool ok = true;
-    while (total < content_length) {
+
+    mbedtls_sha256_context sha;
+    mbedtls_sha256_init(&sha);
+    mbedtls_sha256_starts(&sha, 0);
+    uint8_t buffer[OTA_BUFFER_SIZE], digest[32];
+    size_t total = 0;
+    bool ok = true;
+
+    while (total < partition->size) {
         int n = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
-        if (n <= 0) { ok = false; break; }
-        if (esp_ota_write(handle, buffer, n) != ESP_OK) { ok = false; break; }
-        mbedtls_sha256_update(&sha, buffer, n); total += n;
+        if (n < 0) {
+            ESP_LOGE(TAG, "OTA binary read failed");
+            ok = false;
+            break;
+        }
+        if (n == 0) break;
+        if (total + (size_t)n > partition->size ||
+            (content_length > 0 && total + (size_t)n > (size_t)content_length)) {
+            ESP_LOGE(TAG, "OTA binary exceeds declared/partition size");
+            ok = false;
+            break;
+        }
+        if (esp_ota_write(handle, buffer, n) != ESP_OK) {
+            ESP_LOGE(TAG, "OTA flash write failed");
+            ok = false;
+            break;
+        }
+        mbedtls_sha256_update(&sha, buffer, (size_t)n);
+        total += (size_t)n;
     }
-    mbedtls_sha256_finish(&sha, digest); mbedtls_sha256_free(&sha);
-    esp_http_client_close(client); esp_http_client_cleanup(client);
-    char actual[65]; for (int i=0;i<32;i++) snprintf(actual+i*2,3,"%02x",digest[i]); actual[64]=0;
-    if (total != content_length || strcasecmp(actual, expected_sha) != 0) ok = false;
-    if (!ok) { esp_ota_abort(handle); ESP_LOGE(TAG, "OTA download/hash verification failed"); return false; }
-    if (esp_ota_end(handle) != ESP_OK) return false;
-    if (esp_ota_set_boot_partition(partition) != ESP_OK) return false;
-    ESP_LOGW(TAG, "Verified firmware downloaded. Restarting into new OTA image.");
-    vTaskDelay(pdMS_TO_TICKS(1000)); esp_restart(); return true;
+
+    mbedtls_sha256_finish(&sha, digest);
+    mbedtls_sha256_free(&sha);
+    esp_http_client_close(client);
+    esp_http_client_cleanup(client);
+
+    if (total == 0 || (content_length > 0 && total != (size_t)content_length)) ok = false;
+    char actual[65];
+    for (int i = 0; i < 32; i++) snprintf(actual + i * 2, 3, "%02x", digest[i]);
+    actual[64] = '\0';
+    if (strcasecmp(actual, expected_sha) != 0) ok = false;
+
+    if (!ok) {
+        esp_ota_abort(handle);
+        ESP_LOGE(TAG, "OTA download incomplete or SHA-256 verification failed");
+        return false;
+    }
+    if (esp_ota_end(handle) != ESP_OK) {
+        ESP_LOGE(TAG, "OTA image validation failed");
+        return false;
+    }
+    if (esp_ota_set_boot_partition(partition) != ESP_OK) {
+        ESP_LOGE(TAG, "Could not select new OTA boot partition");
+        return false;
+    }
+
+    ESP_LOGW(TAG, "OTA image downloaded and SHA-256 verified (%u bytes). Restarting.",
+        (unsigned)total);
+    vTaskDelay(pdMS_TO_TICKS(1000));
+    esp_restart();
+    return true;
 }
 
 static void ota_task(void *arg) {
@@ -551,75 +619,75 @@ static void ota_task(void *arg) {
     while (1) {
         esp_http_client_config_t cfg = {
             .url = CONFIG_CLEANNET_OTA_MANIFEST_URL,
-            .timeout_ms = 20000,
+            .timeout_ms = 25000,
             .crt_bundle_attach = esp_crt_bundle_attach,
             .buffer_size = 1024
         };
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
-        if (client && esp_http_client_open(client, 0) == ESP_OK) {
-            int length = esp_http_client_fetch_headers(client);
-            int status = esp_http_client_get_status_code(client);
-            if (status == 200 && (length == -1 || (length > 0 && length <= 4096))) {
-                /* Render/proxies may use chunked transfer and omit Content-Length (-1).
-                   Read until EOF in that case; keep a strict 4 KiB manifest limit. */
-                char *body = calloc(1, 4097);
-                if (body) {
-                    int total = 0;
-                    bool read_ok = true;
-                    while (total < 4096) {
-                        int want = (length > 0) ? (length - total) : (4096 - total);
-                        if (want <= 0) break;
-                        int n = esp_http_client_read(client, body + total, want);
-                        if (n < 0) { read_ok = false; break; }
-                        if (n == 0) break;
-                        total += n;
-                        if (length > 0 && total == length) break;
-                    }
-                    bool complete = read_ok && total > 0 &&
-                        (length == -1 || total == length) && total < 4096;
-                    if (complete) {
-                        cJSON *root = cJSON_ParseWithLength(body, (size_t)total);
-                        if (cJSON_IsObject(root)) {
-                            cJSON *enabled = cJSON_GetObjectItemCaseSensitive(root, "enabled");
-                            cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
-                            cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");
-                            cJSON *sha = cJSON_GetObjectItemCaseSensitive(root, "sha256");
-                            if (cJSON_IsTrue(enabled) && cJSON_IsString(version) &&
-                                cJSON_IsString(url) && cJSON_IsString(sha)) {
-                                if (version_is_newer(version->valuestring, DEVICE_VERSION)) {
-                                    ESP_LOGW(TAG, "New OTA release %s available (current %s)",
-                                        version->valuestring, DEVICE_VERSION);
-                                    ota_download_and_install(url->valuestring, sha->valuestring);
-                                } else {
-                                    ESP_LOGI(TAG, "OTA manifest OK; device version %s is up to date",
-                                        DEVICE_VERSION);
-                                }
-                            } else if (cJSON_IsFalse(enabled)) {
-                                ESP_LOGI(TAG, "OTA manifest OK; no firmware release is currently published");
-                            } else {
-                                ESP_LOGW(TAG, "OTA manifest JSON is missing required fields");
-                            }
-                        } else {
-                            ESP_LOGW(TAG, "OTA manifest response is not valid JSON");
+        if (client) {
+            esp_err_t open_err = esp_http_client_open(client, 0);
+            if (open_err == ESP_OK) {
+                int length = esp_http_client_fetch_headers(client);
+                int status = esp_http_client_get_status_code(client);
+                if (status == 200 && length <= 4096) {
+                    char *body = calloc(1, 4097);
+                    if (body) {
+                        int total = 0;
+                        bool read_ok = true;
+                        while (total < 4096) {
+                            int n = esp_http_client_read(client, body + total, 4096 - total);
+                            if (n < 0) { read_ok = false; break; }
+                            if (n == 0) break;
+                            total += n;
                         }
-                        cJSON_Delete(root);
+                        bool complete = read_ok && total > 0 &&
+                            (length <= 0 || total == length) && total < 4096;
+                        if (complete) {
+                            cJSON *root = cJSON_ParseWithLength(body, (size_t)total);
+                            if (cJSON_IsObject(root)) {
+                                cJSON *enabled = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+                                cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
+                                cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");
+                                cJSON *sha = cJSON_GetObjectItemCaseSensitive(root, "sha256");
+                                if (cJSON_IsTrue(enabled) && cJSON_IsString(version) &&
+                                    cJSON_IsString(url) && cJSON_IsString(sha)) {
+                                    if (version_is_newer(version->valuestring, DEVICE_VERSION)) {
+                                        ESP_LOGW(TAG, "New OTA release %s available (current %s)",
+                                            version->valuestring, DEVICE_VERSION);
+                                        ota_download_and_install(url->valuestring, sha->valuestring);
+                                    } else {
+                                        ESP_LOGI(TAG, "OTA manifest OK; device version %s is up to date",
+                                            DEVICE_VERSION);
+                                    }
+                                } else if (cJSON_IsFalse(enabled)) {
+                                    ESP_LOGI(TAG, "OTA manifest OK; no firmware release is currently published");
+                                } else {
+                                    ESP_LOGW(TAG, "OTA manifest JSON missing required fields");
+                                }
+                            } else {
+                                ESP_LOGW(TAG, "OTA manifest response is not valid JSON");
+                            }
+                            cJSON_Delete(root);
+                        } else {
+                            ESP_LOGW(TAG, "OTA manifest body incomplete/too large/read failed (HTTP %d, Content-Length %d, received %d)",
+                                status, length, total);
+                        }
+                        free(body);
                     } else {
-                        ESP_LOGW(TAG, "OTA manifest body incomplete/too large/read failed (HTTP %d, Content-Length %d, received %d)",
-                            status, length, total);
+                        ESP_LOGE(TAG, "OTA manifest: out of memory");
                     }
-                    free(body);
                 } else {
-                    ESP_LOGE(TAG, "OTA manifest: out of memory");
+                    ESP_LOGW(TAG, "OTA manifest HTTP %d or manifest too large (Content-Length %d)",
+                        status, length);
                 }
+                esp_http_client_close(client);
             } else {
-                ESP_LOGW(TAG, "OTA manifest HTTP %d or unsupported Content-Length %d",
-                    status, length);
+                ESP_LOGW(TAG, "OTA manifest connection failed: %s", esp_err_to_name(open_err));
             }
-            esp_http_client_close(client);
+            esp_http_client_cleanup(client);
         } else {
-            ESP_LOGW(TAG, "OTA manifest connection unavailable; will retry later");
+            ESP_LOGW(TAG, "OTA manifest client initialization failed");
         }
-        if (client) esp_http_client_cleanup(client);
         vTaskDelay(pdMS_TO_TICKS(CONFIG_CLEANNET_OTA_CHECK_SECONDS * 1000ULL));
     }
 }
