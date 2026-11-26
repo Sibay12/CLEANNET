@@ -48,7 +48,7 @@ async def lifespan(_: FastAPI):
     close_database()
 
 
-app = FastAPI(title="CLEANNET API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="CLEANNET API", version="0.4.0", lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.allowed_origins,
@@ -81,7 +81,34 @@ def customer_portal():
 
 @app.get("/health")
 def health():
-    return {"status": "ok", "service": "cleannet-api", "version": "0.3.0"}
+    return {"status": "ok", "service": "cleannet-api", "version": "0.4.0"}
+
+
+@app.get("/api/firmware/manifest")
+def firmware_manifest(channel: str = Query(default="stable", min_length=1, max_length=24)):
+    """Public OTA metadata. Firmware binaries are hosted as immutable HTTPS release assets."""
+    from re import fullmatch
+
+    if not settings.firmware_enabled:
+        return {"enabled": False, "channel": channel, "message": "No firmware release is currently published"}
+    if channel != settings.firmware_channel:
+        return {"enabled": False, "channel": channel, "message": "No release for this channel"}
+    if not settings.firmware_url or not settings.firmware_sha256:
+        raise HTTPException(status_code=503, detail="Firmware release metadata is incomplete")
+    if not settings.firmware_url.startswith("https://"):
+        raise HTTPException(status_code=503, detail="Firmware URL must use HTTPS")
+    if not fullmatch(r"[0-9a-fA-F]{64}", settings.firmware_sha256):
+        raise HTTPException(status_code=503, detail="Firmware SHA-256 must be 64 hexadecimal characters")
+    return {
+        "enabled": True,
+        "product": "CLEANNET",
+        "board": "esp32c3",
+        "channel": settings.firmware_channel,
+        "version": settings.firmware_version,
+        "url": settings.firmware_url,
+        "sha256": settings.firmware_sha256.lower(),
+        "minimum_battery_percent": settings.firmware_min_battery,
+    }
 
 
 @app.get("/ready")
