@@ -7,13 +7,13 @@ Target: ESP32-C3 SuperMini, ESP-IDF 5.5.x.
 
 - Starts a protected setup Wi-Fi access point named `CLEANNET-SETUP-XXXX`.
 - Derives a per-device setup password from the SoftAP MAC suffix and prints it to the serial monitor.
-- Serves a mobile-friendly setup page at `http://192.168.4.1`.
+- Serves a mobile-friendly modular CLEANNET setup dashboard at `http://192.168.4.1`, with an embedded vector logo/illustration, network scan, password visibility toggle, and connection status feedback.
 - Scans nearby 2.4 GHz Wi-Fi networks and displays SSID, RSSI, channel and whether the network is secured.
 - Saves selected router SSID/password in NVS and connects as a station.
 - Runs the prototype DNS filter on UDP/53 after the router assigns an IP.
 - Periodically checks the HTTPS Render firmware manifest.
 - Downloads only HTTPS firmware URLs, checks the downloaded image SHA-256 before selecting it as the next boot image, and uses ESP-IDF OTA rollback support.
-- Uses two OTA application partitions; the configured layout is intended for a 2 MB flash device.
+- Uses two OTA application partitions sized for the confirmed 4 MB ESP32-C3 board (`partitions_ota_4mb.csv`), plus a small reserved filesystem partition.
 
 ## First install / clean configuration
 
@@ -67,14 +67,14 @@ The device rejects non-HTTPS URLs, checks the SHA-256 digest, and only installs 
 - The DNS proxy is an early prototype: small built-in blocklist, sequential UDP DNS forwarding, no cache/concurrency, no TCP DNS, no IPv6 DNS, no DoH/DoT enforcement. VPNs and hard-coded resolvers can bypass DNS filtering.
 - YouTube, first-party and in-app ads are not guaranteed to be blocked.
 - Router DHCP DNS support varies. Test one phone manually before changing the Jio AirFiber LAN/DHCP DNS. Never change WAN DNS for this test.
-- Confirm actual board flash size before flashing. The configured OTA partition layout is sized for 2 MB flash. If the board reports a different size, adjust the partition table before flashing.
+- Confirm actual board flash size before flashing. The 4 MB OTA layout is selected in `sdkconfig.defaults`. If an older local `sdkconfig` overrides that default, remove that generated config only after backing it up, then regenerate configuration before building. Confirm flash size before flashing.
 
 ## Restore / recovery
 
 If Wi-Fi setup fails, reconnect to the CLEANNET setup AP and retry. If DNS filtering interrupts internet, restore the phone's DNS to Automatic. If OTA fails validation, the current firmware remains selected; rollback is enabled for an OTA image that fails to boot and is not marked valid.
 
 
-## LED status indicators (new source change)
+## LED status indicators
 
 The firmware now includes these provisional indicators:
 
@@ -90,3 +90,8 @@ The firmware now includes these provisional indicators:
 The GPIO mapping is provisional for common ESP32-C3 SuperMini variants. Check your exact board pin labels and any existing breadboard wiring before connecting. GPIO8 is reserved for the onboard LED in this firmware. No external PAIR button is assigned in this revision.
 
 The indicator source change has been pushed, but it must still pass the ESP-IDF build and be tested on the physical board before flashing.
+
+
+## Setup dashboard design
+
+The local setup UI is self-contained in firmware: CSS, JavaScript, inline SVG logo and decorative network illustration are embedded in `main.c`. It does not fetch remote images, fonts, or scripts, so the page remains available without internet and does not require a separate web-assets partition. The 4 MB partition map reserves two OTA slots of 0x1D0000 bytes each and a 0x40000-byte filesystem region.
