@@ -93,8 +93,8 @@ def ready():
 
 @app.post("/api/admin/login")
 def admin_login(payload: LoginInput, response: Response):
-    if not settings.admin_password or not settings.session_secret:
-        raise HTTPException(status_code=503, detail="Admin login is not configured. Set ADMIN_PASSWORD and SESSION_SECRET in Render.")
+    if not settings.admin_username or not settings.admin_password or not settings.session_secret:
+        raise HTTPException(status_code=503, detail="Admin login is not configured. Set ADMIN_USERNAME, ADMIN_PASSWORD and SESSION_SECRET in Render.")
     valid_user = payload.username.strip() == settings.admin_username
     valid_password = hmac_compare(payload.password, settings.admin_password)
     if not (valid_user and valid_password):
