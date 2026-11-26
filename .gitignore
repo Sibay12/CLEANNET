@@ -8,3 +8,9 @@ venv/
 .pytest_cache/
 .mypy_cache/
 .DS_Store
+
+# ESP-IDF build output and local Wi-Fi credentials
+firmware/esp32c3/build/
+firmware/esp32c3/sdkconfig
+firmware/esp32c3/sdkconfig.old
+firmware/esp32c3/managed_components/
