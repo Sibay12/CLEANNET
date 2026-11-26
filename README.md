@@ -20,13 +20,12 @@ This phase provides a FastAPI service, MongoDB Atlas connectivity, health checks
 5. Open `/docs` for interactive API documentation.
 
 ### Environment variables
-- `MONGODB_URI` — MongoDB Atlas connection string
-- `MONGODB_DB` — database name (default: `cleannet`)
+- `MONGODB_URI` — MongoDB Atlas connection string. The database name is read from the URI when present; otherwise CLEANNET uses the default database name `cleannet`.
 - `ADMIN_API_KEY` — long random secret for admin API
 - `CORS_ORIGINS` — comma-separated allowed browser origins
 - `APP_ENV` — development or production
 
-Never commit real credentials, device secrets, payment credentials, or customer Wi-Fi passwords. Configure secrets in Render Environment settings.
+A separate `MONGODB_DB` variable is not required. Never commit real credentials, device secrets, payment credentials, or customer Wi-Fi passwords. Configure secrets in Render Environment settings.
 
 ### API
 - `GET /health` — process health
