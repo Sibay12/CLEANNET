@@ -285,6 +285,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     }
 }
 
+static bool version_is_newer(const char *candidate, const char *current) {
+    unsigned int a=0,b=0,c=0,x=0,y=0,z=0;
+    if (sscanf(candidate, "%u.%u.%u", &a, &b, &c) != 3 ||
+        sscanf(current, "%u.%u.%u", &x, &y, &z) != 3) return false;
+    if (a != x) return a > x;
+    if (b != y) return b > y;
+    return c > z;
+}
+
 static bool ota_download_and_install(const char *url, const char *expected_sha) {
     if (strncmp(url, "https://", 8) != 0 || strlen(expected_sha) != 64) return false;
     esp_http_client_config_t cfg = {.url=url, .timeout_ms=20000, .crt_bundle_attach=esp_crt_bundle_attach,
@@ -327,28 +336,33 @@ static void ota_task(void *arg) {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(30000));
     while (1) {
-        esp_http_client_config_t cfg = {.url=CONFIG_CLEANNET_OTA_MANIFEST_URL, .timeout_ms=15000,
+        esp_http_client_config_t cfg = {.url=CONFIG_CLEANNET_OTA_MANIFEST_URL, .timeout_ms=20000,
             .crt_bundle_attach=esp_crt_bundle_attach, .buffer_size=1024};
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
-        if (client && esp_http_client_perform(client) == ESP_OK && esp_http_client_get_status_code(client) == 200) {
-            char *body = calloc(1, 4097);
-            if (body) {
-                int n = esp_http_client_read_response(client, body, 4096);
-                if (n > 0) {
-                    cJSON *root = cJSON_Parse(body);
-                    cJSON *enabled = cJSON_GetObjectItem(root, "enabled");
-                    cJSON *version = cJSON_GetObjectItem(root, "version");
-                    cJSON *url = cJSON_GetObjectItem(root, "url");
-                    cJSON *sha = cJSON_GetObjectItem(root, "sha256");
-                    if (cJSON_IsTrue(enabled) && cJSON_IsString(version) && cJSON_IsString(url) &&
-                        cJSON_IsString(sha) && strcmp(version->valuestring, DEVICE_VERSION) != 0) {
-                        ESP_LOGW(TAG, "OTA release available: %s (current %s)", version->valuestring, DEVICE_VERSION);
-                        ota_download_and_install(url->valuestring, sha->valuestring);
+        if (client && esp_http_client_open(client, 0) == ESP_OK) {
+            int length = esp_http_client_fetch_headers(client);
+            if (esp_http_client_get_status_code(client) == 200 && length > 0 && length < 4096) {
+                char *body = calloc(1, 4097);
+                if (body) {
+                    int total = 0, n = 0;
+                    while (total < length && (n = esp_http_client_read(client, body + total, length - total)) > 0) total += n;
+                    if (total == length) {
+                        cJSON *root = cJSON_ParseWithLength(body, total);
+                        cJSON *enabled = cJSON_GetObjectItem(root, "enabled");
+                        cJSON *version = cJSON_GetObjectItem(root, "version");
+                        cJSON *url = cJSON_GetObjectItem(root, "url");
+                        cJSON *sha = cJSON_GetObjectItem(root, "sha256");
+                        if (cJSON_IsTrue(enabled) && cJSON_IsString(version) && cJSON_IsString(url) &&
+                            cJSON_IsString(sha) && version_is_newer(version->valuestring, DEVICE_VERSION)) {
+                            ESP_LOGW(TAG, "New OTA release %s available (current %s)", version->valuestring, DEVICE_VERSION);
+                            ota_download_and_install(url->valuestring, sha->valuestring);
+                        }
+                        cJSON_Delete(root);
                     }
-                    cJSON_Delete(root);
+                    free(body);
                 }
-                free(body);
-            }
+            } else ESP_LOGW(TAG, "OTA manifest returned HTTP %d or invalid size", esp_http_client_get_status_code(client));
+            esp_http_client_close(client);
         } else ESP_LOGW(TAG, "OTA manifest check unavailable; will retry later");
         if (client) esp_http_client_cleanup(client);
         vTaskDelay(pdMS_TO_TICKS(CONFIG_CLEANNET_OTA_CHECK_SECONDS * 1000ULL));
@@ -361,6 +375,8 @@ void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_erase()); ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    esp_err_t ota_state = esp_ota_mark_app_valid_cancel_rollback();
+    if (ota_state == ESP_OK) ESP_LOGI(TAG, "OTA image marked valid after boot");
     ESP_LOGI(TAG, "CLEANNET %s booting; upstream DNS %s; blocklist %u entries",
         DEVICE_VERSION, CONFIG_CLEANNET_UPSTREAM_DNS, (unsigned)BLOCKED_COUNT);
     s_wifi_events = xEventGroupCreate();
