@@ -2,43 +2,43 @@
 
 DNS-based network ad-filtering platform built by TAKNA TECHNOLOGY and owned by SIBAYAN ENTERPRISE.
 
-## Phase 1 — Backend foundation
+## Current implementation — Phases 1 and 2
+- FastAPI + MongoDB Atlas backend
+- Admin username/password login using a signed HttpOnly session cookie
+- Customer email/password registration and login
+- PBKDF2-HMAC-SHA256 password hashing
+- Admin device inventory and one-time claim-token creation
+- Customer device claim with atomic database update; claim token is consumed
+- Customer dashboard API for owned devices
 
-This phase provides a FastAPI service, MongoDB Atlas connectivity, health checks, and protected device-inventory APIs.
+## Environment variables
+- `MONGODB_URI` — MongoDB Atlas URI; database name is read from URI or defaults to `cleannet`.
+- `ADMIN_USERNAME` — admin login name (default: admin)
+- `ADMIN_PASSWORD` — strong admin password; configure only in Render secret environment
+- `SESSION_SECRET` — long random secret used to sign sessions; configure only in Render
+- `CORS_ORIGINS` — allowed browser origins
+- `APP_ENV` — use production on Render
 
-### Stack
-- Python 3.11+
-- FastAPI + Uvicorn
-- MongoDB Atlas via PyMongo
-- Render deployment blueprint
+Never commit real credentials, session secrets, payment credentials, device secrets, or customer Wi-Fi passwords. Never put admin credentials in frontend JavaScript.
 
-### Run locally
-1. Create a Python 3.11+ virtual environment.
-2. Install dependencies: `pip install -r requirements.txt`
-3. Copy `.env.example` to `.env` and set real values.
-4. Start: `uvicorn app.main:app --reload`
-5. Open `/docs` for interactive API documentation.
+## Routes
+- `GET /health`, `GET /ready`
+- `POST /api/admin/login`, `GET /api/admin/session`
+- `GET/POST /api/admin/devices` (admin session required)
+- `POST /api/customer/register`, `POST /api/customer/login`
+- `GET /api/customer/me`, `POST /api/customer/claim`
+- `POST /api/logout`
 
-### Environment variables
-- `MONGODB_URI` — MongoDB Atlas connection string. The database name is read from the URI when present; otherwise CLEANNET uses the default database name `cleannet`.
-- `ADMIN_API_KEY` — long random secret for admin API
-- `CORS_ORIGINS` — comma-separated allowed browser origins
-- `APP_ENV` — development or production
+Admin and customer sessions are signed, time-limited, HttpOnly, SameSite=Strict cookies. Customer passwords are hashed; plaintext passwords are never stored. QR claim data must contain only device ID and one-time claim token. Wi-Fi credentials are not collected by these web endpoints.
 
-A separate `MONGODB_DB` variable is not required. Never commit real credentials, device secrets, payment credentials, or customer Wi-Fi passwords. Configure secrets in Render Environment settings.
+Camera QR scanning, email verification, password reset, subscriptions, TAKNAPAY verification, and ESP32 firmware are not yet implemented.
 
-### API
-- `GET /health` — process health
-- `GET /ready` — MongoDB readiness
-- `POST /api/admin/devices` — register a device and generate a one-time claim token
-- `GET /api/admin/devices` — list device inventory
+## Run locally
+1. Install dependencies: `pip install -r requirements.txt`
+2. Copy `.env.example` to `.env` and set real values.
+3. Start: `uvicorn app.main:app --reload`
+4. Open `/admin` or `/customer`.
 
-Admin endpoints require header `X-Admin-Key`. The claim token is displayed once; only its SHA-256 hash is stored. Device claiming, customer accounts, QR workflow, subscriptions, TAKNAPAY integration, and ESP32 firmware are later phases.
-
-### Deployment
-Render can deploy this service from this repository using `render.yaml`. Set `MONGODB_URI` and `ADMIN_API_KEY` in the Render service environment before using protected endpoints.
-
-### Product limitation
 DNS filtering cannot guarantee removal of every advertisement. YouTube, in-app, and first-party HTTPS ads may bypass DNS-level filtering.
 
 ## Ownership
