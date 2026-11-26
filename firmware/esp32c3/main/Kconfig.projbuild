@@ -1,13 +1,5 @@
 menu "CLEANNET DNS Configuration"
 
-    config CLEANNET_WIFI_SSID
-        string "Router 2.4 GHz Wi-Fi SSID"
-        default ""
-
-    config CLEANNET_WIFI_PASSWORD
-        string "Router Wi-Fi Password"
-        default ""
-
     config CLEANNET_UPSTREAM_DNS
         string "Upstream DNS IPv4"
         default "1.1.1.1"
@@ -16,5 +8,18 @@ menu "CLEANNET DNS Configuration"
         int "Upstream DNS timeout (ms)"
         range 500 5000
         default 1800
+
+    config CLEANNET_SETUP_AP_SSID
+        string "Setup Wi-Fi AP SSID"
+        default "CLEANNET-SETUP"
+
+    config CLEANNET_OTA_MANIFEST_URL
+        string "OTA manifest HTTPS URL"
+        default "https://cleannet-api-qkv4.onrender.com/api/firmware/manifest"
+
+    config CLEANNET_OTA_CHECK_SECONDS
+        int "Automatic OTA check interval (seconds)"
+        range 300 86400
+        default 21600
 
 endmenu
