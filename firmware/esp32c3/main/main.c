@@ -379,15 +379,15 @@ static bool ota_download_and_install(const char *url, const char *expected_sha) 
     if (esp_ota_begin(partition, content_length, &handle) != ESP_OK) {
         esp_http_client_close(client); esp_http_client_cleanup(client); return false;
     }
-    mbedtls_sha256_context sha; mbedtls_sha256_init(&sha); mbedtls_sha256_starts_ret(&sha, 0);
+    mbedtls_sha256_context sha; mbedtls_sha256_init(&sha); mbedtls_sha256_starts(&sha, 0);
     uint8_t buffer[OTA_BUFFER_SIZE], digest[32]; int total = 0; bool ok = true;
     while (total < content_length) {
         int n = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
         if (n <= 0) { ok = false; break; }
         if (esp_ota_write(handle, buffer, n) != ESP_OK) { ok = false; break; }
-        mbedtls_sha256_update_ret(&sha, buffer, n); total += n;
+        mbedtls_sha256_update(&sha, buffer, n); total += n;
     }
-    mbedtls_sha256_finish_ret(&sha, digest); mbedtls_sha256_free(&sha);
+    mbedtls_sha256_finish(&sha, digest); mbedtls_sha256_free(&sha);
     esp_http_client_close(client); esp_http_client_cleanup(client);
     char actual[65]; for (int i=0;i<32;i++) snprintf(actual+i*2,3,"%02x",digest[i]); actual[64]=0;
     if (total != content_length || strcasecmp(actual, expected_sha) != 0) ok = false;
