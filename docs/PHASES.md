@@ -4,15 +4,20 @@
 - [x] FastAPI application skeleton
 - [x] MongoDB Atlas connection through environment variables
 - [x] Health and readiness endpoints
-- [x] Admin-key protected device inventory API
+- [x] Device inventory API
 - [x] Unique device ID index
 - [x] One-time claim token generation; store only token hash
+- [x] Admin username/password login with signed HttpOnly session cookie
 
 ## Phase 2 — Customer identity and device claiming
-- Customer registration/login
-- QR payload and one-time claim flow
-- Atomic device claim and ownership validation
-- Customer dashboard
+- [x] Customer registration with email and password
+- [x] Customer login/logout session
+- [x] Password hashing with PBKDF2-HMAC-SHA256
+- [x] QR payload fields supported: device_id + one-time claim_token
+- [x] Atomic device claim; token consumed after successful claim
+- [x] Customer dashboard API listing owned devices
+- [ ] Camera-based QR scanner and QR label generation
+- [ ] Email verification and password reset
 
 ## Phase 3 — Subscription and payments
 - Monthly subscription lifecycle
