@@ -8,6 +8,12 @@ class Settings(BaseSettings):
     admin_password: str = ""
     session_secret: str = ""
     cors_origins: str = "http://localhost:3000,http://localhost:8000"
+    firmware_version: str = "0.1.0"
+    firmware_url: str = ""
+    firmware_sha256: str = ""
+    firmware_enabled: bool = False
+    firmware_channel: str = "stable"
+    firmware_min_battery: int = 0
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
