@@ -1,0 +1,20 @@
+menu "CLEANNET DNS Configuration"
+
+    config CLEANNET_WIFI_SSID
+        string "Router 2.4 GHz Wi-Fi SSID"
+        default ""
+
+    config CLEANNET_WIFI_PASSWORD
+        string "Router Wi-Fi Password"
+        default ""
+
+    config CLEANNET_UPSTREAM_DNS
+        string "Upstream DNS IPv4"
+        default "1.1.1.1"
+
+    config CLEANNET_DNS_TIMEOUT_MS
+        int "Upstream DNS timeout (ms)"
+        range 500 5000
+        default 1800
+
+endmenu
