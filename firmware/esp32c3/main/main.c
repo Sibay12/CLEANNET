@@ -189,7 +189,13 @@ static esp_err_t status_json_handler(httpd_req_t *req) {
     if (has_dns && dns.ip.type == ESP_IPADDR_TYPE_V4)
         snprintf(dns_ip,sizeof(dns_ip),IPSTR,IP2STR(&dns.ip.u_addr.ip4));
     cJSON *j=cJSON_CreateObject();
+    uint8_t sta_mac[6] = {0};
+    char mac_text[18] = "unavailable";
+    if (esp_read_mac(sta_mac, ESP_MAC_WIFI_STA) == ESP_OK)
+        snprintf(mac_text, sizeof(mac_text), "%02X:%02X:%02X:%02X:%02X:%02X",
+            sta_mac[0], sta_mac[1], sta_mac[2], sta_mac[3], sta_mac[4], sta_mac[5]);
     cJSON_AddStringToObject(j,"wifi",s_router_connected?"Connected":"Disconnected");
+    cJSON_AddStringToObject(j,"mac",mac_text);
     cJSON_AddStringToObject(j,"ip",ip);
     cJSON_AddStringToObject(j,"gateway",gw);
     cJSON_AddStringToObject(j,"subnet",mask);
