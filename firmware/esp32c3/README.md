@@ -1,6 +1,6 @@
 # CLEANNET ESP32-C3 Firmware (Provisioning + DNS + OTA foundation)
 
-Firmware version: **0.2.0**  
+Firmware version: **0.2.1**  
 Target: ESP32-C3 SuperMini, ESP-IDF 5.5.x.
 
 ## Features in this source revision
@@ -8,6 +8,7 @@ Target: ESP32-C3 SuperMini, ESP-IDF 5.5.x.
 - Starts a protected setup Wi-Fi access point named `CLEANNET-SETUP-XXXX`.
 - Derives a per-device setup password from the SoftAP MAC suffix and prints it to the serial monitor.
 - Serves a mobile-friendly modular CLEANNET setup dashboard at `http://192.168.4.1`, with an embedded vector logo/illustration, network scan, password visibility toggle, and connection status feedback.
+- Serves `/status` and `/api/status` on the router LAN IP; route matching ignores browser-added query strings and logs registration failures.
 - Scans nearby 2.4 GHz Wi-Fi networks and displays SSID, RSSI, channel and whether the network is secured.
 - Saves selected router SSID/password in NVS and connects as a station.
 - Runs the prototype DNS filter on UDP/53 after the router assigns an IP.
