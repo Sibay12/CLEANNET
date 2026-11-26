@@ -17,6 +17,7 @@
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
+#include "driver/gpio.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "esp_mac.h"
@@ -58,6 +59,15 @@ static const char *TAG = "CLEANNET";
 static EventGroupHandle_t s_wifi_events;
 static bool s_dns_started = false;
 static bool s_ota_started = false;
+static volatile uint32_t s_dns_queries_window = 0;
+static volatile bool s_router_connected = false;
+static volatile bool s_internet_available = false;
+
+/* Provisional ESP32-C3 SuperMini mapping; verify board wiring before connecting LEDs. */
+#define CLEANNET_LED_GREEN GPIO_NUM_3
+#define CLEANNET_LED_RED GPIO_NUM_4
+#define CLEANNET_LED_DNS GPIO_NUM_5
+#define CLEANNET_LED_ONBOARD GPIO_NUM_8
 static char s_setup_ssid[33];
 static char s_setup_password[17];
 
@@ -143,6 +153,7 @@ static void dns_server_task(void *arg) {
         struct sockaddr_in client; socklen_t client_len = sizeof(client);
         ssize_t n = recvfrom(server, query, sizeof(query), 0, (struct sockaddr *)&client, &client_len);
         if (n < 12) continue;
+        s_dns_queries_window++;
         char qname[254] = {0};
         if (!get_query_name(query, (size_t)n, qname, sizeof(qname))) continue;
         if (domain_is_blocked(qname)) {
@@ -273,12 +284,67 @@ static bool load_wifi_credentials(wifi_config_t *cfg) {
 
 static void ota_task(void *arg);
 
+static void indicators_init(void) {
+    const gpio_num_t pins[] = {CLEANNET_LED_GREEN, CLEANNET_LED_RED, CLEANNET_LED_DNS, CLEANNET_LED_ONBOARD};
+    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
+        gpio_reset_pin(pins[i]);
+        ESP_ERROR_CHECK(gpio_set_direction(pins[i], GPIO_MODE_OUTPUT));
+        ESP_ERROR_CHECK(gpio_set_level(pins[i], 0));
+    }
+}
+
+static void indicators_task(void *arg) {
+    (void)arg;
+    bool dns_led = false, onboard_led = false;
+    while (1) {
+        gpio_set_level(CLEANNET_LED_GREEN, s_router_connected ? 1 : 0);
+        gpio_set_level(CLEANNET_LED_RED, (s_router_connected && !s_internet_available) ? 1 : 0);
+        uint32_t load = s_dns_queries_window;
+        s_dns_queries_window = 0;
+        dns_led = !dns_led;
+        gpio_set_level(CLEANNET_LED_DNS, dns_led ? 1 : 0);
+        onboard_led = !onboard_led;
+        /* Common SuperMini onboard LED is active-low; clone polarity may differ. */
+        gpio_set_level(CLEANNET_LED_ONBOARD, onboard_led ? 0 : 1);
+        vTaskDelay(pdMS_TO_TICKS(load >= 20 ? 120 : 550));
+    }
+}
+
+static void internet_monitor_task(void *arg) {
+    (void)arg;
+    while (1) {
+        if (!s_router_connected) {
+            s_internet_available = false;
+        } else {
+            esp_http_client_config_t cfg = {
+                .url = "https://connectivitycheck.gstatic.com/generate_204",
+                .timeout_ms = 7000,
+                .crt_bundle_attach = esp_crt_bundle_attach,
+                .buffer_size = 256
+            };
+            esp_http_client_handle_t client = esp_http_client_init(&cfg);
+            if (client) {
+                esp_err_t err = esp_http_client_perform(client);
+                int status = esp_http_client_get_status_code(client);
+                s_internet_available = (err == ESP_OK && (status == 204 || status == 200));
+                esp_http_client_cleanup(client);
+            } else {
+                s_internet_available = false;
+            }
+        }
+        vTaskDelay(pdMS_TO_TICKS(15000));
+    }
+}
+
 static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, void *data) {
     (void)arg;
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
+        s_router_connected = false;
+        s_internet_available = false;
         ESP_LOGW(TAG, "Router Wi-Fi disconnected; setup AP remains available");
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
+        s_router_connected = true;
         ESP_LOGI(TAG, "Router connected. CLEANNET LAN IP: " IPSTR, IP2STR(&event->ip_info.ip));
         if (!s_dns_started) { s_dns_started = true; xTaskCreate(dns_server_task, "cleannet_dns", 6144, NULL, 5, NULL); }
         if (!s_ota_started) { s_ota_started = true; xTaskCreate(ota_task, "cleannet_ota", 8192, NULL, 4, NULL); }
@@ -377,6 +443,9 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
     esp_err_t ota_state = esp_ota_mark_app_valid_cancel_rollback();
     if (ota_state == ESP_OK) ESP_LOGI(TAG, "OTA image marked valid after boot");
+    indicators_init();
+    xTaskCreate(indicators_task, "cleannet_leds", 2048, NULL, 2, NULL);
+    xTaskCreate(internet_monitor_task, "cleannet_netcheck", 4096, NULL, 3, NULL);
     ESP_LOGI(TAG, "CLEANNET %s booting; upstream DNS %s; blocklist %u entries",
         DEVICE_VERSION, CONFIG_CLEANNET_UPSTREAM_DNS, (unsigned)BLOCKED_COUNT);
     s_wifi_events = xEventGroupCreate();
