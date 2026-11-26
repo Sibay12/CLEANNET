@@ -52,7 +52,7 @@
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.2.0"
+#define DEVICE_VERSION "0.2.1"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
@@ -144,11 +144,12 @@ static bool forward_dns(const uint8_t *query, size_t query_len, uint8_t *reply, 
 static void dns_server_task(void *arg) {
     (void)arg;
     int server = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-    if (server < 0) { ESP_LOGE(TAG, "DNS socket failed: %d", errno); vTaskDelete(NULL); return; }
+    if (server < 0) { s_dns_started = false; ESP_LOGE(TAG, "DNS socket failed: %d", errno); vTaskDelete(NULL); return; }
     struct sockaddr_in local = {.sin_family = AF_INET, .sin_port = htons(DNS_PORT), .sin_addr.s_addr = htonl(INADDR_ANY)};
     if (bind(server, (struct sockaddr *)&local, sizeof(local)) < 0) {
-        ESP_LOGE(TAG, "DNS bind failed: %d", errno); close(server); vTaskDelete(NULL); return;
+        s_dns_started = false; ESP_LOGE(TAG, "DNS bind failed: %d", errno); close(server); vTaskDelete(NULL); return;
     }
+    s_dns_started = true;
     ESP_LOGI(TAG, "DNS proxy listening on UDP/53");
     uint8_t query[DNS_PACKET_MAX], reply[DNS_PACKET_MAX];
     while (1) {
@@ -202,7 +203,7 @@ static esp_err_t status_json_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(j,"dhcp_dns",dns_ip);
     cJSON_AddStringToObject(j,"internet",s_internet_available?"Online":"Offline / checking");
     cJSON_AddStringToObject(j,"server",s_server_available?"Reachable":"Unavailable / checking");
-    cJSON_AddStringToObject(j,"dns_service",s_router_connected?"UDP port 53 active":"Waiting for Wi-Fi");
+    cJSON_AddStringToObject(j,"dns_service",s_dns_started?"UDP/53 listening":(s_router_connected?"Starting / unavailable":"Waiting for Wi-Fi"));
     cJSON_AddNumberToObject(j,"dns_total",s_dns_total);
     cJSON_AddNumberToObject(j,"dns_blocked",s_dns_blocked);
     cJSON_AddNumberToObject(j,"dns_failures",s_dns_upstream_failures);
@@ -335,17 +336,43 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     return httpd_resp_sendstr(req, "{\"ok\":true,\"message\":\"Credentials saved. CLEANNET is connecting; check serial monitor for its LAN IP.\"}");
 }
 
+/* Ignore query strings added by browsers or link wrappers when matching routes. */
+static bool uri_match_ignore_query(const char *registered_uri, const char *request_uri, size_t request_uri_len) {
+    const char *query = memchr(request_uri, '?', request_uri_len);
+    size_t path_len = query ? (size_t)(query - request_uri) : request_uri_len;
+    return strlen(registered_uri) == path_len &&
+           strncmp(registered_uri, request_uri, path_len) == 0;
+}
+
 static void start_setup_server(void) {
-    httpd_config_t config = HTTPD_DEFAULT_CONFIG(); config.server_port = 80; config.max_uri_handlers = 8;
+    httpd_config_t config = HTTPD_DEFAULT_CONFIG();
+    config.server_port = 80;
+    config.max_uri_handlers = 8;
+    config.uri_match_fn = uri_match_ignore_query;
     httpd_handle_t server = NULL;
-    if (httpd_start(&server, &config) != ESP_OK) { ESP_LOGE(TAG, "Setup web server failed"); return; }
-    httpd_uri_t root = {.uri="/", .method=HTTP_GET, .handler=root_handler};
-    httpd_uri_t status_page = {.uri="/status", .method=HTTP_GET, .handler=status_page_handler};
-    httpd_uri_t status_json = {.uri="/api/status", .method=HTTP_GET, .handler=status_json_handler};
-    httpd_uri_t scan = {.uri="/api/scan", .method=HTTP_GET, .handler=scan_handler};
-    httpd_uri_t connect = {.uri="/api/connect", .method=HTTP_POST, .handler=connect_handler};
-    httpd_register_uri_handler(server, &root); httpd_register_uri_handler(server, &status_page); httpd_register_uri_handler(server, &status_json); httpd_register_uri_handler(server, &scan);
-    httpd_register_uri_handler(server, &connect);
+    esp_err_t start_err = httpd_start(&server, &config);
+    if (start_err != ESP_OK || server == NULL) {
+        ESP_LOGE(TAG, "Setup web server failed: %s", esp_err_to_name(start_err));
+        return;
+    }
+
+    const httpd_uri_t routes[] = {
+        {.uri="/", .method=HTTP_GET, .handler=root_handler},
+        {.uri="/status", .method=HTTP_GET, .handler=status_page_handler},
+        {.uri="/api/status", .method=HTTP_GET, .handler=status_json_handler},
+        {.uri="/api/scan", .method=HTTP_GET, .handler=scan_handler},
+        {.uri="/api/connect", .method=HTTP_POST, .handler=connect_handler}
+    };
+    for (size_t i = 0; i < sizeof(routes) / sizeof(routes[0]); i++) {
+        esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "HTTP route registration failed for %s: %s",
+                     routes[i].uri, esp_err_to_name(err));
+        } else {
+            ESP_LOGI(TAG, "HTTP route registered: %s", routes[i].uri);
+        }
+    }
+    ESP_LOGI(TAG, "CLEANNET setup/status HTTP server ready on port 80");
 }
 
 static void start_setup_ap(void) {
@@ -459,8 +486,15 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         ESP_LOGI(TAG, "Router connected. CLEANNET LAN IP: " IPSTR, IP2STR(&event->ip_info.ip));
         ESP_LOGI(TAG, "Gateway: " IPSTR " | Subnet: " IPSTR, IP2STR(&event->ip_info.gw), IP2STR(&event->ip_info.netmask));
         ESP_LOGI(TAG, "Set router Primary DNS to CLEANNET LAN IP: " IPSTR, IP2STR(&event->ip_info.ip));
-        if (!s_dns_started) { s_dns_started = true; xTaskCreate(dns_server_task, "cleannet_dns", 6144, NULL, 5, NULL); }
-        if (!s_ota_started) { s_ota_started = true; xTaskCreate(ota_task, "cleannet_ota", 8192, NULL, 4, NULL); }
+        if (!s_dns_started) {
+            BaseType_t dns_task = xTaskCreate(dns_server_task, "cleannet_dns", 6144, NULL, 5, NULL);
+            if (dns_task != pdPASS) ESP_LOGE(TAG, "Could not create DNS task");
+        }
+        if (!s_ota_started) {
+            BaseType_t ota_task_created = xTaskCreate(ota_task, "cleannet_ota", 8192, NULL, 4, NULL);
+            if (ota_task_created == pdPASS) s_ota_started = true;
+            else ESP_LOGE(TAG, "Could not create OTA task");
+        }
     }
 }
 
