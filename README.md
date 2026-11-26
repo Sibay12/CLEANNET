@@ -11,11 +11,20 @@ DNS-based network ad-filtering platform built by TAKNA TECHNOLOGY and owned by S
 - Customer device claim with atomic database update; claim token is consumed
 - Customer dashboard API for owned devices
 
-## Environment variables
+## Render environment variables — Admin credentials
+Admin login credentials are controlled only by the Render service environment. They are not hardcoded in the admin page or frontend JavaScript.
+
+Set these keys in Render Dashboard → CLEANNET service → Environment:
+- `ADMIN_USERNAME` — the exact username used on the Admin Login page
+- `ADMIN_PASSWORD` — the exact password used on the Admin Login page
+- `SESSION_SECRET` — a long random signing secret; do not use this as the login password
+
+To change the admin login, edit `ADMIN_USERNAME` and/or `ADMIN_PASSWORD` in Render and save. Render will restart/redeploy the service to load the new values. Existing admin sessions may need to sign in again. Keep a private record of the new username/password before saving. Render may mask secret values after saving; if you cannot view an old password, set a new one and use that new value.
+
+For local development, use the same variable names in a private `.env` file. Never commit `.env` or real credentials to GitHub.
+
+## Other environment variables
 - `MONGODB_URI` — MongoDB Atlas URI; database name is read from URI or defaults to `cleannet`.
-- `ADMIN_USERNAME` — admin login name (default: admin)
-- `ADMIN_PASSWORD` — strong admin password; configure only in Render secret environment
-- `SESSION_SECRET` — long random secret used to sign sessions; configure only in Render
 - `CORS_ORIGINS` — allowed browser origins
 - `APP_ENV` — use production on Render
 
