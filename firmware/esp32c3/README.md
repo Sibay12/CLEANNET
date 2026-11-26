@@ -1,74 +1,74 @@
-# CLEANNET ESP32-C3 DNS Test Firmware
+# CLEANNET ESP32-C3 Firmware (Provisioning + DNS + OTA foundation)
 
-This is an initial LAN DNS filtering test firmware for ESP32-C3 SuperMini. It connects to an existing 2.4 GHz Wi-Fi router as a station, listens for DNS queries on UDP/53, returns NXDOMAIN for configured blocked domains, and forwards other queries to an upstream DNS resolver.
+Firmware version: **0.2.0**  
+Target: ESP32-C3 SuperMini, ESP-IDF 5.5.x.
 
-## Important limitations
+## Features in this source revision
 
-- This is an early test build, not production firmware.
-- It uses a small built-in domain blocklist. Remote blocklist updates are not implemented.
-- It currently handles ordinary UDP DNS only. DNS-over-HTTPS, DNS-over-TLS, VPN DNS, hard-coded app resolvers, and IPv6 DNS can bypass it.
-- Test with one phone before changing router-wide DHCP DNS.
-- Some routers expose separate WAN DNS and LAN/DHCP DNS. For this test, clients must receive the ESP32 IP as their DNS server.
-- The ESP32-C3 has limited RAM/CPU. This first build forwards requests sequentially and is intended for a small 4–5 device trial, not a performance guarantee.
-- YouTube and first-party/in-app ads are not guaranteed to be blocked.
-- Never publish your Wi-Fi password or sdkconfig file.
+- Starts a protected setup Wi-Fi access point named `CLEANNET-SETUP-XXXX`.
+- Derives a per-device setup password from the SoftAP MAC suffix and prints it to the serial monitor.
+- Serves a mobile-friendly setup page at `http://192.168.4.1`.
+- Scans nearby 2.4 GHz Wi-Fi networks and displays SSID, RSSI, channel and whether the network is secured.
+- Saves selected router SSID/password in NVS and connects as a station.
+- Runs the prototype DNS filter on UDP/53 after the router assigns an IP.
+- Periodically checks the HTTPS Render firmware manifest.
+- Downloads only HTTPS firmware URLs, checks the downloaded image SHA-256 before selecting it as the next boot image, and uses ESP-IDF OTA rollback support.
+- Uses two OTA application partitions; the configured layout is intended for a 2 MB flash device.
 
-## Requirements
+## First install / clean configuration
 
-- ESP32-C3 SuperMini board and known-good USB data cable
-- Windows PC
-- ESP-IDF 5.x with ESP32-C3 toolchain
-- 2.4 GHz Wi-Fi network (ESP32-C3 does not support 5 GHz Wi-Fi)
+Open ESP-IDF 5.5.x CMD:
 
-## Configure and build on Windows
-
-Open ESP-IDF 5.x CMD, then:
-
-    cd path\\to\\CLEANNET\\firmware\\esp32c3
+    cd path\to\CLEANNET\firmware\esp32c3
     idf.py set-target esp32c3
-    idf.py menuconfig
-
-Under CLEANNET DNS Configuration, set your router 2.4 GHz SSID, Wi-Fi password, and upstream DNS IPv4 (default 1.1.1.1). Save and exit. Then:
-
+    idf.py fullclean
     idf.py build
-    idf.py -p COMx flash monitor
+    idf.py -p COM4 flash monitor
 
-Replace COMx with the port shown in Windows Device Manager. If download mode does not start automatically, hold BOOT, tap RESET, release RESET, then release BOOT and retry.
+Replace COM4 with the port shown in Device Manager. The custom partition table is required for OTA. The first flash writes the new partition table and app; it may replace the existing test partition layout. Back up anything important before flashing.
 
-## First test: one phone
+After boot, serial output prints a setup SSID and password, for example:
 
-1. Flash firmware and open the serial monitor.
-2. Wait for the log line showing Device IP: x.x.x.x.
-3. On one test phone, open the connected Wi-Fi network details. Set DNS 1 to the ESP32 IP. If Android requires Static IP mode, preserve the existing IP, gateway and prefix values exactly; change only DNS. Do not guess the ESP32 IP.
-4. Browse normal sites and check the serial monitor for BLOCK domain.example lines.
-5. If internet stops working, restore DNS to Automatic.
+    Setup Wi-Fi: CLEANNET-SETUP-A1B2 | Password: CNA1B2C3 | Open http://192.168.4.1
 
-## Test 4–5 devices
+Connect a phone or PC to that setup Wi-Fi, then open **http://192.168.4.1**. Press Scan, choose the Jio AirFiber 2.4 GHz SSID, enter its password, and press Save & Connect. The setup AP remains available for future reconfiguration. Do not share the setup password or router password.
 
-After the single-phone test succeeds, reserve the ESP32 MAC/IP in the router if supported. Set the router LAN DHCP DNS/DNS server handed to clients to the ESP32 IP. Reconnect Wi-Fi on each test device. Do not change WAN/upstream DNS unless the router documentation confirms it controls client DNS.
+Once connected, serial output prints the device's DHCP IP address. Test DNS manually on one phone first. Do not change router-wide LAN/DHCP DNS until the one-device test passes.
 
-If the router cannot advertise a custom LAN DNS address, use manual DNS on each test device or a separate router/AP that supports custom DHCP DNS.
+## OTA backend configuration
 
-## Restore
+The device checks:
 
-Set client DNS back to Automatic or restore the router's previous LAN DHCP DNS value. The ESP32 can then be unplugged without affecting normal connectivity.
+    https://cleannet-api-qkv4.onrender.com/api/firmware/manifest
 
-## Implemented in this test build
+The backend returns `enabled=false` until an administrator publishes a release. To publish a release:
 
-- Wi-Fi station connection to a 2.4 GHz router
-- DHCP IP address and serial logging
-- UDP DNS listener on port 53
-- Basic suffix-aware domain blocklist
-- NXDOMAIN response for blocked domains
-- Upstream DNS forwarding for allowed domains
+1. Build and test the new firmware for the exact ESP32-C3 target and OTA partition layout.
+2. Create a GitHub Release and upload the generated `cleannet_esp32c3_dns.bin` as an immutable release asset.
+3. Calculate SHA-256 of that exact binary (Windows: `certutil -hashfile cleannet_esp32c3_dns.bin SHA256`).
+4. In the existing Render service Environment, set:
+   - `FIRMWARE_ENABLED=true`
+   - `FIRMWARE_VERSION` to a strictly higher semantic version (for example `0.2.1`)
+   - `FIRMWARE_CHANNEL=stable`
+   - `FIRMWARE_URL` to the direct HTTPS GitHub Release asset URL
+   - `FIRMWARE_SHA256` to the 64-character SHA-256 hex digest
+5. Save the environment changes and wait for the Render service restart. The device checks every 6 hours by default.
 
-## Not implemented
+The device rejects non-HTTPS URLs, checks the SHA-256 digest, and only installs a semantically newer version. TLS certificate verification is enabled using the ESP certificate bundle. SHA-256 verifies transfer integrity against the HTTPS manifest; this revision does **not** implement a separate public-key signature scheme. Do not enable a release until its binary has been built and tested. Never point production devices at an untested build.
 
-- Web setup portal / BLE provisioning
-- Admin/customer device authentication and heartbeat
-- Remote blocklist updates
-- DNS cache and concurrent request processing
-- IPv6 DNS handling
-- DNS-over-TLS / DNS-over-HTTPS policy
-- Signed OTA updates
-- Production security hardening and hardware stress tests
+## Important limitations / test status
+
+- This is a development/test firmware source revision. It has not yet been compiled or flashed on the owner's physical board in this revision.
+- Wi-Fi provisioning currently uses a local setup AP and HTTP page. Its unique password is printed on serial; setup should be performed locally.
+- NVS stores Wi-Fi credentials. NVS encryption is not configured in this revision.
+- The setup page is opened manually at 192.168.4.1; captive-portal auto-popup is not implemented.
+- OTA only becomes active after a real firmware asset is uploaded and the Render manifest variables are set.
+- The backend's free Render service may sleep; OTA checks can be delayed while it wakes.
+- The DNS proxy is an early prototype: small built-in blocklist, sequential UDP DNS forwarding, no cache/concurrency, no TCP DNS, no IPv6 DNS, no DoH/DoT enforcement. VPNs and hard-coded resolvers can bypass DNS filtering.
+- YouTube, first-party and in-app ads are not guaranteed to be blocked.
+- Router DHCP DNS support varies. Test one phone manually before changing the Jio AirFiber LAN/DHCP DNS. Never change WAN DNS for this test.
+- Confirm actual board flash size before flashing. The configured OTA partition layout is sized for 2 MB flash. If the board reports a different size, adjust the partition table before flashing.
+
+## Restore / recovery
+
+If Wi-Fi setup fails, reconnect to the CLEANNET setup AP and retry. If DNS filtering interrupts internet, restore the phone's DNS to Automatic. If OTA fails validation, the current firmware remains selected; rollback is enabled for an OTA image that fails to boot and is not marked valid.
