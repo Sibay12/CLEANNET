@@ -7,7 +7,7 @@ from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 from pymongo.errors import DuplicateKeyError
 
 from app.config import settings
@@ -36,18 +36,16 @@ class ClaimInput(BaseModel):
 class BlocklistUpdate(BaseModel):
     domains: list[str] = Field(min_length=1, max_length=1000)
 
+    @field_validator("domains")
     @classmethod
-    def _normalize_domain(cls, value: str) -> str:
-        domain = value.strip().lower().rstrip(".")
-        if len(domain) > 253 or not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}", domain):
-            raise ValueError("Invalid domain name")
-        return domain
-
-    @classmethod
-    def model_validate(cls, obj, **kwargs):
-        if isinstance(obj, dict) and isinstance(obj.get("domains"), list):
-            obj = {**obj, "domains": [cls._normalize_domain(x) if isinstance(x, str) else x for x in obj["domains"]]}
-        return super().model_validate(obj, **kwargs)
+    def normalize_domains(cls, values: list[str]) -> list[str]:
+        normalized = []
+        for value in values:
+            domain = value.strip().lower().rstrip(".")
+            if len(domain) > 253 or not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}", domain):
+                raise ValueError(f"Invalid domain name: {value}")
+            normalized.append(domain)
+        return normalized
 
 
 @asynccontextmanager
