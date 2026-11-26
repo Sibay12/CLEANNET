@@ -515,34 +515,76 @@ static void ota_task(void *arg) {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(30000));
     while (1) {
-        esp_http_client_config_t cfg = {.url=CONFIG_CLEANNET_OTA_MANIFEST_URL, .timeout_ms=20000,
-            .crt_bundle_attach=esp_crt_bundle_attach, .buffer_size=1024};
+        esp_http_client_config_t cfg = {
+            .url = CONFIG_CLEANNET_OTA_MANIFEST_URL,
+            .timeout_ms = 20000,
+            .crt_bundle_attach = esp_crt_bundle_attach,
+            .buffer_size = 1024
+        };
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
         if (client && esp_http_client_open(client, 0) == ESP_OK) {
             int length = esp_http_client_fetch_headers(client);
-            if (esp_http_client_get_status_code(client) == 200 && length > 0 && length < 4096) {
+            int status = esp_http_client_get_status_code(client);
+            if (status == 200 && (length == -1 || (length > 0 && length <= 4096))) {
+                /* Render/proxies may use chunked transfer and omit Content-Length (-1).
+                   Read until EOF in that case; keep a strict 4 KiB manifest limit. */
                 char *body = calloc(1, 4097);
                 if (body) {
-                    int total = 0, n = 0;
-                    while (total < length && (n = esp_http_client_read(client, body + total, length - total)) > 0) total += n;
-                    if (total == length) {
-                        cJSON *root = cJSON_ParseWithLength(body, total);
-                        cJSON *enabled = cJSON_GetObjectItem(root, "enabled");
-                        cJSON *version = cJSON_GetObjectItem(root, "version");
-                        cJSON *url = cJSON_GetObjectItem(root, "url");
-                        cJSON *sha = cJSON_GetObjectItem(root, "sha256");
-                        if (cJSON_IsTrue(enabled) && cJSON_IsString(version) && cJSON_IsString(url) &&
-                            cJSON_IsString(sha) && version_is_newer(version->valuestring, DEVICE_VERSION)) {
-                            ESP_LOGW(TAG, "New OTA release %s available (current %s)", version->valuestring, DEVICE_VERSION);
-                            ota_download_and_install(url->valuestring, sha->valuestring);
+                    int total = 0;
+                    bool read_ok = true;
+                    while (total < 4096) {
+                        int want = (length > 0) ? (length - total) : (4096 - total);
+                        if (want <= 0) break;
+                        int n = esp_http_client_read(client, body + total, want);
+                        if (n < 0) { read_ok = false; break; }
+                        if (n == 0) break;
+                        total += n;
+                        if (length > 0 && total == length) break;
+                    }
+                    bool complete = read_ok && total > 0 &&
+                        (length == -1 || total == length) && total < 4096;
+                    if (complete) {
+                        cJSON *root = cJSON_ParseWithLength(body, (size_t)total);
+                        if (cJSON_IsObject(root)) {
+                            cJSON *enabled = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+                            cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
+                            cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");
+                            cJSON *sha = cJSON_GetObjectItemCaseSensitive(root, "sha256");
+                            if (cJSON_IsTrue(enabled) && cJSON_IsString(version) &&
+                                cJSON_IsString(url) && cJSON_IsString(sha)) {
+                                if (version_is_newer(version->valuestring, DEVICE_VERSION)) {
+                                    ESP_LOGW(TAG, "New OTA release %s available (current %s)",
+                                        version->valuestring, DEVICE_VERSION);
+                                    ota_download_and_install(url->valuestring, sha->valuestring);
+                                } else {
+                                    ESP_LOGI(TAG, "OTA manifest OK; device version %s is up to date",
+                                        DEVICE_VERSION);
+                                }
+                            } else if (cJSON_IsFalse(enabled)) {
+                                ESP_LOGI(TAG, "OTA manifest OK; no firmware release is currently published");
+                            } else {
+                                ESP_LOGW(TAG, "OTA manifest JSON is missing required fields");
+                            }
+                        } else {
+                            ESP_LOGW(TAG, "OTA manifest response is not valid JSON");
                         }
                         cJSON_Delete(root);
+                    } else {
+                        ESP_LOGW(TAG, "OTA manifest body incomplete/too large/read failed (HTTP %d, Content-Length %d, received %d)",
+                            status, length, total);
                     }
                     free(body);
+                } else {
+                    ESP_LOGE(TAG, "OTA manifest: out of memory");
                 }
-            } else ESP_LOGW(TAG, "OTA manifest returned HTTP %d or invalid size", esp_http_client_get_status_code(client));
+            } else {
+                ESP_LOGW(TAG, "OTA manifest HTTP %d or unsupported Content-Length %d",
+                    status, length);
+            }
             esp_http_client_close(client);
-        } else ESP_LOGW(TAG, "OTA manifest check unavailable; will retry later");
+        } else {
+            ESP_LOGW(TAG, "OTA manifest connection unavailable; will retry later");
+        }
         if (client) esp_http_client_cleanup(client);
         vTaskDelay(pdMS_TO_TICKS(CONFIG_CLEANNET_OTA_CHECK_SECONDS * 1000ULL));
     }
