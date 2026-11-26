@@ -16,7 +16,9 @@ def get_client() -> MongoClient:
 
 
 def get_db():
-    return get_client()[settings.mongodb_db]
+    # Use the database name embedded in the MongoDB URI.
+    # If the URI does not include one, fall back to "cleannet".
+    return get_client().get_default_database(default="cleannet")
 
 
 def check_database() -> bool:
