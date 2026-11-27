@@ -64,7 +64,7 @@
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.2.8"
+#define DEVICE_VERSION "0.2.9"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
@@ -191,7 +191,12 @@ static bool sync_remote_blocklist(void) {
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     bool ok = false;
-    if (esp_get_free_heap_size() < 50000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 16000) {\n        ESP_LOGW(TAG, "Skipping blocklist sync: insufficient heap headroom");\n        if (s_https_mutex) xSemaphoreGive(s_https_mutex);\n        return false;\n    }\n    char *body = (char *)malloc(4097);
+    if (esp_get_free_heap_size() < 50000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 16000) {
+        ESP_LOGW(TAG, "Skipping blocklist sync: insufficient heap headroom");
+        if (s_https_mutex) xSemaphoreGive(s_https_mutex);
+        return false;
+    }
+    char *body = (char *)malloc(4097);
     if (client && body) {
         esp_err_t err = esp_http_client_open(client, 0);
         if (err == ESP_OK) {
@@ -790,115 +795,168 @@ static bool version_is_newer(const char *candidate, const char *current) {
 }
 
 static bool ota_download_and_install(const char *url, const char *expected_sha) {
+    bool success = false;
+    bool ota_started = false;
+    esp_http_client_handle_t client = NULL;
+    esp_ota_handle_t handle = 0;
+    const esp_partition_t *partition = NULL;
+    mbedtls_sha256_context sha;
+    bool sha_initialized = false;
+    uint8_t digest[32] = {0};
+    char actual[65] = {0};
+    size_t total = 0;
+    int content_length = -1;
+
     s_led_ota_state = LED_OTA_RECEIVING;
-    if (!url || strncmp(url, "https://", 8) != 0 || !expected_sha || strlen(expected_sha) != 64) {
-        ESP_LOGE(TAG, "OTA manifest URL or SHA-256 is invalid");
-        return false;
+    if (!url || strncmp(url, "https://", 8) != 0 || !expected_sha ||
+        strlen(expected_sha) != 64) {
+        ESP_LOGE(TAG, "OTA metadata invalid: URL must be HTTPS and SHA-256 must be 64 hex characters");
+        goto cleanup;
+    }
+    for (size_t i = 0; i < 64; i++) {
+        if (!((expected_sha[i] >= '0' && expected_sha[i] <= '9') ||
+              (expected_sha[i] >= 'a' && expected_sha[i] <= 'f') ||
+              (expected_sha[i] >= 'A' && expected_sha[i] <= 'F'))) {
+            ESP_LOGE(TAG, "OTA manifest SHA-256 contains a non-hex character at index %u", (unsigned)i);
+            goto cleanup;
+        }
     }
 
-    const esp_partition_t *partition = esp_ota_get_next_update_partition(NULL);
+    partition = esp_ota_get_next_update_partition(NULL);
     if (!partition) {
-        ESP_LOGE(TAG, "No OTA update partition available");
-        return false;
+        ESP_LOGE(TAG, "OTA failed: no update partition available");
+        goto cleanup;
     }
+    ESP_LOGI(TAG, "OTA target partition=%s size=%u", partition->label, (unsigned)partition->size);
 
-    esp_http_client_config_t cfg = {        .url = url, .timeout_ms = 45000, .crt_bundle_attach = esp_crt_bundle_attach,
-        .buffer_size = OTA_BUFFER_SIZE, .keep_alive_enable = true
+    esp_http_client_config_t cfg = {
+        .url = url,
+        .timeout_ms = 45000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = OTA_BUFFER_SIZE,
+        .keep_alive_enable = true
     };
-    esp_http_client_handle_t client = esp_http_client_init(&cfg);
-    if (!client) return false;
+    client = esp_http_client_init(&cfg);
+    if (!client) {
+        ESP_LOGE(TAG, "OTA failed: HTTP client initialization failed");
+        goto cleanup;
+    }
 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "OTA binary connection failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);        return false;
+        ESP_LOGE(TAG, "OTA binary HTTPS/TLS connection failed: %s (0x%x)",
+            esp_err_to_name(err), (unsigned)err);
+        goto cleanup;
     }
 
-    int content_length = esp_http_client_fetch_headers(client);
+    content_length = esp_http_client_fetch_headers(client);
     int status = esp_http_client_get_status_code(client);
-    if (status != 200 || content_length > (int)partition->size) {
-        ESP_LOGE(TAG, "OTA binary HTTP %d or invalid size %d (partition %u)",
-            status, content_length, (unsigned)partition->size);
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return false;
+    ESP_LOGI(TAG, "OTA binary response: HTTP %d, Content-Length %d", status, content_length);
+    if (status != 200 || content_length == 0 || content_length > (int)partition->size) {
+        ESP_LOGE(TAG, "OTA rejected: HTTP status or image size invalid (partition=%u)",
+            (unsigned)partition->size);
+        goto cleanup;
     }
 
-    esp_ota_handle_t handle = 0;
-    if (esp_ota_begin(partition, OTA_SIZE_UNKNOWN, &handle) != ESP_OK) {
-        ESP_LOGE(TAG, "Could not begin OTA write");
-        esp_http_client_close(client);
-        esp_http_client_cleanup(client);
-        return false;
+    err = esp_ota_begin(partition, OTA_SIZE_UNKNOWN, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA flash begin failed: %s (0x%x)", esp_err_to_name(err), (unsigned)err);
+        goto cleanup;
     }
+    ota_started = true;
 
-    mbedtls_sha256_context sha;
     mbedtls_sha256_init(&sha);
-    mbedtls_sha256_starts(&sha, 0);
-    uint8_t buffer[OTA_BUFFER_SIZE], digest[32];
-    size_t total = 0;
-    bool ok = true;
+    sha_initialized = true;
+    if (mbedtls_sha256_starts(&sha, 0) != 0) {
+        ESP_LOGE(TAG, "OTA SHA-256 initialization failed");
+        goto cleanup;
+    }
 
+    uint8_t buffer[OTA_BUFFER_SIZE];
+    bool read_complete = false;
     while (total < partition->size) {
         int n = esp_http_client_read(client, (char *)buffer, sizeof(buffer));
         if (n < 0) {
-            ESP_LOGE(TAG, "OTA binary read failed");
-            ok = false;
+            ESP_LOGE(TAG, "OTA binary read failed after %u bytes", (unsigned)total);
+            goto cleanup;
+        }
+        if (n == 0) {
+            read_complete = true;
             break;
         }
-        if (n == 0) break;
         if (total + (size_t)n > partition->size ||
             (content_length > 0 && total + (size_t)n > (size_t)content_length)) {
-            ESP_LOGE(TAG, "OTA binary exceeds declared/partition size");
-            ok = false;
-            break;
+            ESP_LOGE(TAG, "OTA binary exceeded declared/partition size");
+            goto cleanup;
         }
-        if (esp_ota_write(handle, buffer, n) != ESP_OK) {
-            ESP_LOGE(TAG, "OTA flash write failed");
-            ok = false;
-            break;
+        err = esp_ota_write(handle, buffer, (size_t)n);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "OTA flash write failed: %s (0x%x)", esp_err_to_name(err), (unsigned)err);
+            goto cleanup;
         }
-        mbedtls_sha256_update(&sha, buffer, (size_t)n);
+        if (mbedtls_sha256_update(&sha, buffer, (size_t)n) != 0) {
+            ESP_LOGE(TAG, "OTA SHA-256 update failed");
+            goto cleanup;
+        }
         total += (size_t)n;
     }
 
-    mbedtls_sha256_finish(&sha, digest);
+    if (!read_complete || total == 0 ||
+        (content_length > 0 && total != (size_t)content_length)) {
+        ESP_LOGE(TAG, "OTA download incomplete: received=%u expected=%d",
+            (unsigned)total, content_length);
+        goto cleanup;
+    }
+    if (mbedtls_sha256_finish(&sha, digest) != 0) {
+        ESP_LOGE(TAG, "OTA SHA-256 finalization failed");
+        goto cleanup;
+    }
     mbedtls_sha256_free(&sha);
-    esp_http_client_close(client);
-    esp_http_client_cleanup(client);
+    sha_initialized = false;
 
-    s_led_ota_state = LED_OTA_VERIFYING;
-    if (total == 0 || (content_length > 0 && total != (size_t)content_length)) ok = false;
-    char actual[65];
     for (int i = 0; i < 32; i++) snprintf(actual + i * 2, 3, "%02x", digest[i]);
     actual[64] = '\0';
-    if (strcasecmp(actual, expected_sha) != 0) ok = false;
-
-    if (!ok) {
-        s_led_ota_state = LED_OTA_IDLE;
-        esp_ota_abort(handle);
-        ESP_LOGE(TAG, "OTA download incomplete or SHA-256 verification failed");
-        return false;
+    s_led_ota_state = LED_OTA_VERIFYING;
+    if (strcasecmp(actual, expected_sha) != 0) {
+        ESP_LOGE(TAG, "OTA SHA-256 VERIFICATION FAILED");
+        ESP_LOGE(TAG, "OTA SHA-256 expected: %s", expected_sha);
+        ESP_LOGE(TAG, "OTA SHA-256 actual:   %s", actual);
+        goto cleanup;
     }
+    ESP_LOGI(TAG, "OTA SHA-256 verification passed (%u bytes)", (unsigned)total);
+
     s_led_ota_state = LED_OTA_INSTALLING;
-    if (esp_ota_end(handle) != ESP_OK) {
-        s_led_ota_state = LED_OTA_IDLE;
-        ESP_LOGE(TAG, "OTA image validation failed");
-        return false;
+    err = esp_ota_end(handle);
+    ota_started = false;
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA image validation failed: %s (0x%x)", esp_err_to_name(err), (unsigned)err);
+        goto cleanup;
     }
-    if (esp_ota_set_boot_partition(partition) != ESP_OK) {
-        s_led_ota_state = LED_OTA_IDLE;
-        ESP_LOGE(TAG, "Could not select new OTA boot partition");
-        return false;
+    err = esp_ota_set_boot_partition(partition);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "OTA boot partition selection failed: %s (0x%x)", esp_err_to_name(err), (unsigned)err);
+        goto cleanup;
     }
 
-    ESP_LOGW(TAG, "OTA image downloaded and SHA-256 verified (%u bytes). Restarting.",
-        (unsigned)total);
+    ESP_LOGW(TAG, "OTA image installed and SHA-256 verified (%u bytes); restarting", (unsigned)total);
+    success = true;
     s_led_ota_state = LED_OTA_READY;
     vTaskDelay(pdMS_TO_TICKS(1500));
     led_set_rgb(0, 0, 0);
     esp_restart();
-    return true;
+
+cleanup:
+    if (sha_initialized) mbedtls_sha256_free(&sha);
+    if (ota_started) esp_ota_abort(handle);
+    if (client) {
+        esp_http_client_close(client);
+        esp_http_client_cleanup(client);
+    }
+    if (!success) {
+        s_led_ota_state = LED_OTA_IDLE;
+        ESP_LOGW(TAG, "OTA attempt ended without installing firmware; current firmware remains active");
+    }
+    return success;
 }
 
 static void ota_task(void *arg) {
