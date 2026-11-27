@@ -434,7 +434,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "<section class='card'><h2>Connect to your router</h2><p>Choose your home network and enter its Wi-Fi password. Your credentials are saved on this device.</p>"
         "<div class='actions'><button class='primary' id='scanBtn' onclick='scan()'>⌕ &nbsp; Scan Wi-Fi networks</button></div>"
         "<div class='field'><label for='nets'>Nearby networks</label><select id='nets'><option value=''>Scan to find networks</option></select></div>"
-        "<div class='field'><label for='deviceToken'>Cloud Device Token (optional)</label><input id='deviceToken' type='password' maxlength='200' autocomplete='off' placeholder='Paste the one-time device token from Admin Panel'><div class='hint'>Required for cloud heartbeat and approximate location. It is stored on this device and sent only over HTTPS.</div></div>"
+        "<div class='field'><label for='deviceToken'>Cloud Device Token (optional)</label><input id='deviceToken' type='password' maxlength='200' autocomplete='off' placeholder='Paste the one-time device token from Admin Panel'><div class='hint'>Required for cloud heartbeat and approximate location. Saved locally over the WPA2 setup AP; cloud heartbeat uses HTTPS.</div></div>"
         "<div class='field'><label for='ssid'>Wi-Fi name (SSID)</label><input id='ssid' maxlength='32' autocomplete='off' placeholder='Enter Wi-Fi name'></div>"
         "<div class='field'><label for='pw'>Wi-Fi password</label><div class='passwordRow'><input id='pw' type='password' maxlength='64' autocomplete='new-password' placeholder='Enter Wi-Fi password'><button type='button' onclick='togglePassword()'>Show</button></div><div class='hint'>Your Wi-Fi password is sent only to this CLEANNET device over its local setup connection.</div></div>"
         "<button class='primary' id='connectBtn' style='width:100%' onclick='connectNet()'>Save &amp; Connect</button><div id='msg' class='status' role='status' aria-live='polite'>Ready. Scan for nearby Wi-Fi networks to begin.</div></section>"
@@ -887,7 +887,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             else ESP_LOGE(TAG, "Could not create OTA task");
         }
         if (!s_heartbeat_started) {
-            BaseType_t heartbeat_created = xTaskCreate(device_heartbeat_task, "cleannet_heartbeat", 6144, NULL, 3, NULL);
+            BaseType_t heartbeat_created = xTaskCreate(device_heartbeat_task, "cleannet_heartbeat", 8192, NULL, 3, NULL);
             if (heartbeat_created == pdPASS) s_heartbeat_started = true;
             else ESP_LOGE(TAG, "Could not create device heartbeat task");
         }
