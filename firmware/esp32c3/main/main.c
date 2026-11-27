@@ -14,6 +14,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "freertos/event_groups.h"
+#include "freertos/semphr.h"
 #include "esp_event.h"
 #include "esp_log.h"
 #include "esp_netif.h"
@@ -65,6 +66,7 @@
 
 static const char *TAG = "CLEANNET";
 static EventGroupHandle_t s_wifi_events;
+static SemaphoreHandle_t s_https_mutex;
 static bool s_dns_started = false;
 static bool s_ota_started = false;
 
@@ -612,6 +614,7 @@ static void server_monitor_task(void *arg) {
     while (1) {
         s_server_available = false;
         if (s_router_connected && s_internet_available) {
+            if (s_https_mutex) xSemaphoreTake(s_https_mutex, portMAX_DELAY);
             esp_http_client_config_t cfg = {.url=CONFIG_CLEANNET_OTA_MANIFEST_URL,
                 .timeout_ms=12000,.crt_bundle_attach=esp_crt_bundle_attach,.buffer_size=512};
             esp_http_client_handle_t client=esp_http_client_init(&cfg);
@@ -624,6 +627,7 @@ static void server_monitor_task(void *arg) {
                 ESP_LOGI(TAG,"CLEANNET server check: %s (HTTP %d)",s_server_available?"reachable":"unavailable",status);
                 esp_http_client_cleanup(client);
             }
+            if (s_https_mutex) xSemaphoreGive(s_https_mutex);
         }
         vTaskDelay(pdMS_TO_TICKS(60000));
     }
@@ -641,6 +645,7 @@ static void internet_monitor_task(void *arg) {
                 .crt_bundle_attach = esp_crt_bundle_attach,
                 .buffer_size = 256
             };
+            if (s_https_mutex) xSemaphoreTake(s_https_mutex, portMAX_DELAY);
             log_ota_heap("before internet-monitor HTTPS");
             esp_http_client_handle_t client = esp_http_client_init(&cfg);
             if (client) {
@@ -652,6 +657,7 @@ static void internet_monitor_task(void *arg) {
             } else {
                 s_internet_available = false;
             }
+            if (s_https_mutex) xSemaphoreGive(s_https_mutex);
         }
         vTaskDelay(pdMS_TO_TICKS(15000));
     }
@@ -813,6 +819,7 @@ static void ota_task(void *arg) {
             .crt_bundle_attach = esp_crt_bundle_attach,
             .buffer_size = 1024
         };
+        if (s_https_mutex) xSemaphoreTake(s_https_mutex, portMAX_DELAY);
         log_ota_heap("before manifest client init");
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
         if (client) {
@@ -823,19 +830,19 @@ static void ota_task(void *arg) {
             if (open_err == ESP_OK) {
                 int length = esp_http_client_fetch_headers(client);
                 int status = esp_http_client_get_status_code(client);
-                if (status == 200 && length <= 4096) {
-                    char *body = calloc(1, 4097);
-                    if (body) {
+                if (status == 200 && length <= 1024) {
+                    char body[1025] = {0};
+                    {
                         int total = 0;
                         bool read_ok = true;
-                        while (total < 4096) {
-                            int n = esp_http_client_read(client, body + total, 4096 - total);
+                        while (total < 1024) {
+                            int n = esp_http_client_read(client, body + total, 1024 - total);
                             if (n < 0) { read_ok = false; break; }
                             if (n == 0) break;
                             total += n;
                         }
                         bool complete = read_ok && total > 0 &&
-                            (length <= 0 || total == length) && total < 4096;
+                            (length <= 0 || total == length) && total < 1024;
                         if (complete) {
                             cJSON *root = cJSON_ParseWithLength(body, (size_t)total);
                             if (cJSON_IsObject(root)) {
@@ -865,11 +872,9 @@ static void ota_task(void *arg) {
                             ESP_LOGW(TAG, "OTA manifest body incomplete/too large/read failed (HTTP %d, Content-Length %d, received %d)",
                                 status, length, total);
                         }
-                        free(body);                    } else {
-                        ESP_LOGE(TAG, "OTA manifest: out of memory");
                     }
                 } else {
-                    ESP_LOGW(TAG, "OTA manifest HTTP %d or manifest too large (Content-Length %d)",
+                    ESP_LOGW(TAG, "OTA manifest HTTP %d or manifest too large (Content-Length %d; max 1024)",
                         status, length);
                 }
                 esp_http_client_close(client);
@@ -880,6 +885,7 @@ static void ota_task(void *arg) {
         } else {
             ESP_LOGW(TAG, "OTA manifest client initialization failed");
         }
+        if (s_https_mutex) xSemaphoreGive(s_https_mutex);
         vTaskDelay(pdMS_TO_TICKS(CONFIG_CLEANNET_OTA_CHECK_SECONDS * 1000ULL));
     }
 }
@@ -929,6 +935,8 @@ void app_main(void) {
     ESP_ERROR_CHECK(ret);
     esp_err_t ota_state = esp_ota_mark_app_valid_cancel_rollback();
     if (ota_state == ESP_OK) ESP_LOGI(TAG, "OTA image marked valid after boot");
+    s_https_mutex = xSemaphoreCreateMutex();
+    if (!s_https_mutex) ESP_LOGE(TAG, "Could not create HTTPS mutex; HTTPS checks will be unsafe");
     indicators_init();
     ble_init();
     pairing_button_init();
