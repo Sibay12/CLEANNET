@@ -63,7 +63,7 @@
 #ifndef CONFIG_CLEANNET_HEARTBEAT_URL
 #define CONFIG_CLEANNET_HEARTBEAT_URL "https://cleannet-api-qkv4.onrender.com/api/device/heartbeat"
 #endif
-#define CLEANNET_HEARTBEAT_SECONDS 900
+#define CLEANNET_HEARTBEAT_SECONDS 60
 
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
