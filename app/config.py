@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     firmware_enabled: bool = False
     firmware_channel: str = "stable"
     firmware_min_battery: int = 0
+    gemini_api_key: str = ""
 
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
