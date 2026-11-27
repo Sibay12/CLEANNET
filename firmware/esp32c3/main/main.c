@@ -104,12 +104,11 @@ static volatile size_t s_remote_blocked_count = 0;
 static uint32_t s_blocklist_version = 0;
 static volatile uint32_t s_dns_total = 0, s_dns_blocked = 0, s_dns_upstream_failures = 0;
 
-/* RHD-320-L addressable LED PCB: WS2812-compatible, 800 kHz, GRB.
- * Use one pixel (index 0) on the Left PCB; remaining pixels stay off.
- * GPIO0 remains reserved for the previously planned physical PAIR button. */
+/* CLEANNET five-pixel addressable RGB PCB: WS2812-compatible, 800 kHz, GRB.
+ * User-facing LED numbering is LED1..LED5; driver indices are 0..4 in data-chain order.
+ * GPIO0 remains reserved for the physical PAIR button. */
 #define CLEANNET_LED_DATA_GPIO GPIO_NUM_3
 #define CLEANNET_LED_PIXEL_COUNT 5
-#define CLEANNET_LED_ACTIVE_PIXEL 0
 #define CLEANNET_PAIR_BUTTON_GPIO GPIO_NUM_0
 static char s_setup_ssid[33];
 static char s_setup_password[17];
@@ -627,10 +626,15 @@ static void ota_task(void *arg);
 
 static void led_set_rgb(uint8_t red, uint8_t green, uint8_t blue) {
     if (!s_led_strip) return;
-    for (int i = 0; i < CLEANNET_LED_PIXEL_COUNT; i++) {
+    for (int i = 0; i < CLEANNET_LED_PIXEL_COUNT; i++)
         led_strip_set_pixel(s_led_strip, i, red, green, blue);
-    }
     led_strip_refresh(s_led_strip);
+}
+
+static void led_set_one(int led_number, uint8_t red, uint8_t green, uint8_t blue) {
+    if (!s_led_strip || led_number < 1 || led_number > CLEANNET_LED_PIXEL_COUNT) return;
+    /* Convert the PCB's 1..5 numbering to the driver's 0..4 indices. */
+    led_strip_set_pixel(s_led_strip, led_number - 1, red, green, blue);
 }
 
 static void indicators_init(void) {
@@ -653,44 +657,79 @@ static void indicators_init(void) {
 
 static void indicators_task(void *arg) {
     (void)arg;
-    TickType_t boot_started = xTaskGetTickCount();
-    bool phase = false;
-    while (1) {
-        TickType_t elapsed = xTaskGetTickCount() - boot_started;
-        uint32_t period_ms = 500;
-        uint8_t r = 0, g = 0, b = 0;
+    const TickType_t boot_started = xTaskGetTickCount();
 
-        if (s_led_ota_state == LED_OTA_READY) {
-            r = 0; g = 0; b = 255;              /* verified image, restart pending */
-        } else if (s_led_ota_state == LED_OTA_RECEIVING) {
-            period_ms = 120; phase = !phase;    /* fast blue blink while downloading/writing */
-            if (phase) b = 255;
-        } else if (s_led_ota_state == LED_OTA_VERIFYING) {
-            period_ms = 180;                    /* blue double-flash */
-            uint32_t t = (xTaskGetTickCount() * portTICK_PERIOD_MS) % 1100;
-            if (t < 140 || (t >= 300 && t < 440)) b = 255;
-        } else if (s_led_ota_state == LED_OTA_INSTALLING) {
-            period_ms = 250; phase = !phase;    /* boot partition commit */
-            if (phase) b = 255;
-        } else if (s_pairing_until != 0 && (int32_t)(s_pairing_until - xTaskGetTickCount()) > 0) {
-            period_ms = 350; phase = !phase;    /* pairing: purple slow blink */
-            if (phase) { r = 180; b = 255; }
-        } else if (elapsed < pdMS_TO_TICKS(3000)) {
-            r = 255;                            /* booting: steady red */
-        } else if (!s_router_connected || !s_internet_available) {
-            period_ms = 500; phase = !phase;    /* no internet: red blink */
-            if (phase) r = 255;
-        } else if (s_dns_started) {
-            period_ms = 700; phase = !phase;    /* DNS active: green pulse */
-            if (phase) g = 255;
-        } else {            g = 255;                            /* internet connected */
+    while (1) {
+        const uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
+        const bool blink_500 = ((now_ms / 500U) % 2U) == 0U;
+        const bool blink_250 = ((now_ms / 250U) % 2U) == 0U;
+        const bool pulse_700 = ((now_ms / 700U) % 2U) == 0U;
+
+        /* OTA uses a blue moving chase; verification uses cyan; ready is solid blue. */
+        if (s_led_ota_state != LED_OTA_IDLE) {
+            int active = (int)((now_ms / 140U) % CLEANNET_LED_PIXEL_COUNT) + 1;
+            for (int led = 1; led <= CLEANNET_LED_PIXEL_COUNT; led++) {
+                uint8_t r = 0, g = 0, b = 0;
+                if (s_led_ota_state == LED_OTA_READY) {
+                    b = 255;
+                } else if (led == active) {
+                    if (s_led_ota_state == LED_OTA_VERIFYING) { g = 180; b = 255; }
+                    else { b = 255; }
+                }
+                led_set_one(led, r, g, b);
+            }
+            led_strip_refresh(s_led_strip);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
         }
 
-        led_set_rgb(r, g, b);
-        if (s_led_ota_state == LED_OTA_READY) vTaskDelay(pdMS_TO_TICKS(100));
-        else vTaskDelay(pdMS_TO_TICKS(period_ms));
-    }}
+        /* Pairing: purple light moves LED1 -> LED5, never all five together. */
+        if (s_pairing_until != 0 &&
+            (int32_t)(s_pairing_until - xTaskGetTickCount()) > 0) {
+            int active = (int)((now_ms / 300U) % CLEANNET_LED_PIXEL_COUNT) + 1;
+            for (int led = 1; led <= CLEANNET_LED_PIXEL_COUNT; led++)
+                led_set_one(led, led == active ? 180 : 0, 0, led == active ? 255 : 0);
+            led_strip_refresh(s_led_strip);
+            vTaskDelay(pdMS_TO_TICKS(100));
+            continue;
+        }
 
+        /* LED1: Power / boot status. */
+        if (xTaskGetTickCount() - boot_started < pdMS_TO_TICKS(3000))
+            led_set_one(1, blink_250 ? 255 : 0, 0, 0);
+        else
+            led_set_one(1, 0, 35, 0); /* dim green = running */
+
+        /* LED2: Router Wi-Fi link. */
+        if (s_router_connected)
+            led_set_one(2, 0, 0, 255); /* steady blue */
+        else
+            led_set_one(2, blink_500 ? 255 : 0, 0, 0); /* red blink */
+
+        /* LED3: Internet reachability. */
+        if (s_internet_available)
+            led_set_one(3, 0, pulse_700 ? 255 : 35, 0); /* green pulse */
+        else
+            led_set_one(3, blink_500 ? 255 : 0, blink_500 ? 80 : 0, 0); /* amber blink */
+
+        /* LED4: Local DNS service. */
+        if (s_dns_started)
+            led_set_one(4, 0, pulse_700 ? 180 : 30, pulse_700 ? 255 : 50); /* cyan pulse */
+        else
+            led_set_one(4, 0, 0, 0);
+
+        /* LED5: CLEANNET cloud/API reachability. */
+        if (s_server_available)
+            led_set_one(5, 0, blink_500 ? 255 : 50, blink_500 ? 80 : 15); /* green blink */
+        else if (s_internet_available)
+            led_set_one(5, blink_500 ? 255 : 0, blink_500 ? 100 : 0, 0); /* amber blink */
+        else
+            led_set_one(5, 0, 0, 0);
+
+        led_strip_refresh(s_led_strip);
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+}
 
 /* Hold the physical PAIR button for 3 seconds to show pairing mode for 3 minutes.
  * GPIO0 is a boot-strapping pin on ESP32-C3: do not hold the button while powering on.
