@@ -59,7 +59,7 @@
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.2.2"
+#define DEVICE_VERSION "0.2.3"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
@@ -67,6 +67,32 @@ static EventGroupHandle_t s_wifi_events;
 static bool s_dns_started = false;
 static bool s_ota_started = false;
 static volatile uint32_t s_dns_queries_window = 0;
+static esp_err_t assign_new_wifi_session_mac(void) {
+    uint8_t factory_mac[6] = {0};
+    uint8_t session_mac[6] = {0};
+    esp_err_t err = esp_read_mac(factory_mac, ESP_MAC_WIFI_STA);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Could not read factory Wi-Fi MAC: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    /* Generate a locally administered unicast address; factory eFuse MAC is untouched. */
+    for (int attempt = 0; attempt < 8; attempt++) {
+        esp_fill_random(session_mac, sizeof(session_mac));
+        session_mac[0] = (session_mac[0] & 0xFE) | 0x02;
+        if (memcmp(session_mac, factory_mac, sizeof(session_mac)) != 0) break;
+    }
+
+    err = esp_wifi_set_mac(WIFI_IF_STA, session_mac);
+    if (err == ESP_OK) {
+        ESP_LOGI(TAG, "Wi-Fi session MAC assigned: %02X:%02X:%02X:%02X:%02X:%02X",
+            session_mac[0], session_mac[1], session_mac[2],
+            session_mac[3], session_mac[4], session_mac[5]);
+    } else {
+        ESP_LOGE(TAG, "Could not assign Wi-Fi session MAC: %s", esp_err_to_name(err));
+    }
+    return err;
+}
 static led_strip_handle_t s_led_strip = NULL;
 typedef enum { LED_OTA_IDLE = 0, LED_OTA_RECEIVING, LED_OTA_VERIFYING, LED_OTA_INSTALLING, LED_OTA_READY } led_ota_state_t;
 static volatile led_ota_state_t s_led_ota_state = LED_OTA_IDLE;
@@ -210,7 +236,7 @@ static esp_err_t status_json_handler(httpd_req_t *req) {
     cJSON *j=cJSON_CreateObject();
     uint8_t sta_mac[6] = {0};
     char mac_text[18] = "unavailable";
-    if (esp_read_mac(sta_mac, ESP_MAC_WIFI_STA) == ESP_OK)
+    if (esp_wifi_get_mac(WIFI_IF_STA, sta_mac) == ESP_OK)
         snprintf(mac_text, sizeof(mac_text), "%02X:%02X:%02X:%02X:%02X:%02X",
             sta_mac[0], sta_mac[1], sta_mac[2], sta_mac[3], sta_mac[4], sta_mac[5]);
     cJSON_AddStringToObject(j,"wifi",s_router_connected?"Connected":"Disconnected");
@@ -386,8 +412,29 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     strlcpy((char *)cfg.sta.password, password->valuestring, sizeof(cfg.sta.password));
     cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
     cfg.sta.pmf_cfg.capable = true; cfg.sta.pmf_cfg.required = false;
-    esp_wifi_disconnect();
-    esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    if (s_router_connected) {
+        xEventGroupClearBits(s_wifi_events, BIT0);
+        esp_wifi_disconnect();
+        EventBits_t bits = xEventGroupWaitBits(s_wifi_events, BIT0, pdTRUE, pdFALSE,
+            pdMS_TO_TICKS(5000));
+        if ((bits & BIT0) == 0) {
+            cJSON_Delete(json);
+            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+                "Timed out waiting for Wi-Fi disconnect before MAC change");
+        }
+    }
+    err = assign_new_wifi_session_mac();
+    if (err != ESP_OK) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Could not assign a new Wi-Fi session MAC");
+    }
+    err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    if (err != ESP_OK) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Could not apply router Wi-Fi settings");
+    }
     /* Keep Setup AP available briefly so the phone can receive connection status. */
     s_pairing_until = xTaskGetTickCount() + pdMS_TO_TICKS(180000);
     start_setup_ap();
@@ -644,6 +691,7 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
     if (base == WIFI_EVENT && id == WIFI_EVENT_STA_DISCONNECTED) {
         s_router_connected = false;
         s_internet_available = false;
+        if (s_wifi_events) xEventGroupSetBits(s_wifi_events, BIT0);
         ESP_LOGW(TAG, "Router Wi-Fi disconnected; setup AP remains available");
     } else if (base == IP_EVENT && id == IP_EVENT_STA_GOT_IP) {
         ip_event_got_ip_t *event = (ip_event_got_ip_t *)data;
@@ -936,5 +984,8 @@ void app_main(void) {
     }
     ESP_ERROR_CHECK(esp_wifi_start());
     start_setup_server();
-    if (have_creds) ESP_ERROR_CHECK(esp_wifi_connect());
+    if (have_creds) {
+        ESP_ERROR_CHECK(assign_new_wifi_session_mac());
+        ESP_ERROR_CHECK(esp_wifi_connect());
+    }
 }
