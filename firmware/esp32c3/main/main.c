@@ -63,12 +63,12 @@
 #ifndef CONFIG_CLEANNET_HEARTBEAT_URL
 #define CONFIG_CLEANNET_HEARTBEAT_URL "https://cleannet-api-qkv4.onrender.com/api/device/heartbeat"
 #endif
-#define CLEANNET_HEARTBEAT_SECONDS 900
+#define CLEANNET_HEARTBEAT_SECONDS 60
 
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.3.0"
+#define DEVICE_VERSION "0.3.1"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
@@ -78,6 +78,9 @@ static bool s_dns_started = false;
 static bool s_ota_started = false;
 static bool s_heartbeat_started = false;
 static char s_device_token[201] = {0};
+static char s_command_ack[65] = {0};
+static volatile uint8_t s_test_led1[3] = {255, 0, 255};
+static volatile uint8_t s_test_led5[3] = {0, 255, 255};
 
 /* Capture heap headroom around HTTPS/TLS operations for OTA diagnostics. */
 static void log_ota_heap(const char *stage) {
@@ -104,11 +107,13 @@ static volatile size_t s_remote_blocked_count = 0;
 static uint32_t s_blocklist_version = 0;
 static volatile uint32_t s_dns_total = 0, s_dns_blocked = 0, s_dns_upstream_failures = 0;
 
-/* CLEANNET five-pixel addressable RGB PCB: WS2812-compatible, 800 kHz, GRB.
- * User-facing LED numbering is LED1..LED5; driver indices are 0..4 in data-chain order.
+/* Five-pixel WS2812 chain. Test build uses physical pixels 2..4 only.
+ * Logical LED1=Wi-Fi, LED2=Internet, LED3=DNS/Cloud.
+ * Physical pixel 1 (power) and pixel 5 are intentionally kept off.
  * GPIO0 remains reserved for the physical PAIR button. */
 #define CLEANNET_LED_DATA_GPIO GPIO_NUM_3
 #define CLEANNET_LED_PIXEL_COUNT 5
+#define CLEANNET_STATUS_LED_COUNT 3
 #define CLEANNET_PAIR_BUTTON_GPIO GPIO_NUM_0
 static char s_setup_ssid[33];
 static char s_setup_password[17];
@@ -632,9 +637,9 @@ static void led_set_rgb(uint8_t red, uint8_t green, uint8_t blue) {
 }
 
 static void led_set_one(int led_number, uint8_t red, uint8_t green, uint8_t blue) {
-    if (!s_led_strip || led_number < 1 || led_number > CLEANNET_LED_PIXEL_COUNT) return;
-    /* Convert the PCB's 1..5 numbering to the driver's 0..4 indices. */
-    led_strip_set_pixel(s_led_strip, led_number - 1, red, green, blue);
+    if (!s_led_strip || led_number < 1 || led_number > CLEANNET_STATUS_LED_COUNT) return;
+    /* Map logical status LEDs 1..3 to physical chain pixels 2..4. */
+    led_strip_set_pixel(s_led_strip, led_number, red, green, blue);
 }
 
 static void indicators_init(void) {
@@ -665,13 +670,13 @@ static void indicators_task(void *arg) {
         const bool blink_250 = ((now_ms / 250U) % 2U) == 0U;
         const bool pulse_700 = ((now_ms / 700U) % 2U) == 0U;
 
-        /* OTA uses a blue moving chase; verification uses cyan; ready is solid blue. */
+        /* OTA blue/cyan chase across the three active status LEDs. */
         if (s_led_ota_state != LED_OTA_IDLE) {
-            int active = (int)((now_ms / 140U) % CLEANNET_LED_PIXEL_COUNT) + 1;
-            for (int led = 1; led <= CLEANNET_LED_PIXEL_COUNT; led++) {
+            int active = (int)((now_ms / 180U) % CLEANNET_STATUS_LED_COUNT) + 1;
+            for (int led = 1; led <= CLEANNET_STATUS_LED_COUNT; led++) {
                 uint8_t r = 0, g = 0, b = 0;
                 if (s_led_ota_state == LED_OTA_READY) {
-                    if (led == 5) b = 255; /* LED5 alone: verified image / restart pending */
+                    if (led == CLEANNET_STATUS_LED_COUNT) b = 255;
                 } else if (led == active) {
                     if (s_led_ota_state == LED_OTA_VERIFYING) { g = 180; b = 255; }
                     else { b = 255; }
@@ -683,51 +688,36 @@ static void indicators_task(void *arg) {
             continue;
         }
 
-        /* Pairing: purple light moves LED1 -> LED5, never all five together. */
+        /* Pairing: purple chase across the three active status LEDs. */
         if (s_pairing_until != 0 &&
             (int32_t)(s_pairing_until - xTaskGetTickCount()) > 0) {
-            int active = (int)((now_ms / 300U) % CLEANNET_LED_PIXEL_COUNT) + 1;
-            for (int led = 1; led <= CLEANNET_LED_PIXEL_COUNT; led++)
+            int active = (int)((now_ms / 300U) % CLEANNET_STATUS_LED_COUNT) + 1;
+            for (int led = 1; led <= CLEANNET_STATUS_LED_COUNT; led++)
                 led_set_one(led, led == active ? 180 : 0, 0, led == active ? 255 : 0);
             led_strip_refresh(s_led_strip);
             vTaskDelay(pdMS_TO_TICKS(100));
             continue;
         }
 
-        /* LED1: Power / boot status. */
-        if (xTaskGetTickCount() - boot_started < pdMS_TO_TICKS(3000))
-            led_set_one(1, blink_250 ? 255 : 0, 0, 0);
-        else
-            led_set_one(1, 0, 35, 0); /* dim green = running */
+        /* Admin color-test pixels: physical pixel 1 and pixel 5. */
+        led_strip_set_pixel(s_led_strip, 0, s_test_led1[0], s_test_led1[1], s_test_led1[2]);
+        led_strip_set_pixel(s_led_strip, 4, s_test_led5[0], s_test_led5[1], s_test_led5[2]);
 
-        /* LED2: Router Wi-Fi link. */
-        if (s_router_connected)
-            led_set_one(2, 0, 0, 255); /* steady blue */
-        else
-            led_set_one(2, blink_500 ? 255 : 0, 0, 0); /* red blink */
+        /* Status LED1 (physical pixel 2): Router Wi-Fi link. */
+        if (s_router_connected) led_set_one(1, 0, 0, 255);
+        else led_set_one(1, blink_500 ? 255 : 0, 0, 0);
 
-        /* LED3: Internet reachability. */
-        if (s_internet_available)
-            led_set_one(3, 0, pulse_700 ? 255 : 35, 0); /* green pulse */
-        else
-            led_set_one(3, blink_500 ? 255 : 0, blink_500 ? 80 : 0, 0); /* amber blink */
+        /* Status LED2 (physical pixel 3): Internet reachability. */
+        if (s_internet_available) led_set_one(2, 0, pulse_700 ? 255 : 35, 0);
+        else led_set_one(2, blink_500 ? 255 : 0, blink_500 ? 80 : 0, 0);
 
-        /* LED4: Local DNS service. */
-        if (s_dns_started)
-            led_set_one(4, 0, pulse_700 ? 180 : 30, pulse_700 ? 255 : 50); /* cyan pulse */
-        else
-            led_set_one(4, 0, 0, 0);
+        /* Status LED3 (physical pixel 4): DNS + Cloud/API combined.
+         * Green=cloud reachable; cyan=DNS active; amber=internet only. */
+        if (s_server_available) led_set_one(3, 0, blink_500 ? 255 : 50, blink_500 ? 80 : 15);
+        else if (s_dns_started) led_set_one(3, 0, pulse_700 ? 180 : 30, pulse_700 ? 255 : 50);
+        else if (s_internet_available) led_set_one(3, blink_500 ? 255 : 0, blink_500 ? 100 : 0, 0);
+        else led_set_one(3, 0, 0, 0);
 
-        /* LED5: CLEANNET cloud/API reachability. */
-        if (s_server_available)
-            led_set_one(5, 0, blink_500 ? 255 : 50, blink_500 ? 80 : 15); /* green blink */
-        else if (s_internet_available)
-            led_set_one(5, blink_500 ? 255 : 0, blink_500 ? 100 : 0, 0); /* amber blink */
-        else
-            led_set_one(5, 0, 0, 0);
-
-        led_strip_refresh(s_led_strip);
-        vTaskDelay(pdMS_TO_TICKS(100));
     }
 }
 
@@ -774,6 +764,37 @@ static void pairing_button_init(void) {
 }
 
 
+static bool parse_hex_color(const char *hex, uint8_t rgb[3]) {
+    if (!hex || strlen(hex) != 7 || hex[0] != '#') return false;
+    for (int i = 0; i < 3; i++) {
+        char pair[3] = {hex[1 + i * 2], hex[2 + i * 2], 0};
+        char *end = NULL;
+        long value = strtol(pair, &end, 16);
+        if (!end || *end != 0 || value < 0 || value > 255) return false;
+        rgb[i] = (uint8_t)value;
+    }
+    return true;
+}
+
+typedef struct {
+    char body[1024];
+    size_t length;
+} heartbeat_response_t;
+
+static esp_err_t heartbeat_http_event(esp_http_client_event_t *event) {
+    heartbeat_response_t *response = (heartbeat_response_t *)event->user_data;
+    if (event->event_id == HTTP_EVENT_ON_DATA && response && event->data && event->data_len > 0) {
+        size_t available = sizeof(response->body) - 1 - response->length;
+        size_t copy_len = (size_t)event->data_len < available ? (size_t)event->data_len : available;
+        if (copy_len) {
+            memcpy(response->body + response->length, event->data, copy_len);
+            response->length += copy_len;
+            response->body[response->length] = '\0';
+        }
+    }
+    return ESP_OK;
+}
+
 static bool send_device_heartbeat(void) {
     if (!s_device_token[0] || !s_router_connected || !s_internet_available) return false;
     if (s_https_mutex) xSemaphoreTake(s_https_mutex, portMAX_DELAY);
@@ -802,6 +823,7 @@ static bool send_device_heartbeat(void) {
     cJSON_AddStringToObject(root, "lan_ip", lan_ip);
     cJSON_AddNumberToObject(root, "dns_total", s_dns_total);
     cJSON_AddNumberToObject(root, "dns_blocked", s_dns_blocked);
+    if (s_command_ack[0]) cJSON_AddStringToObject(root, "command_ack", s_command_ack);
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!body) {
@@ -809,14 +831,18 @@ static bool send_device_heartbeat(void) {
         return false;
     }
 
+    heartbeat_response_t response = {0};
     esp_http_client_config_t cfg = {
         .url = CONFIG_CLEANNET_HEARTBEAT_URL,
         .timeout_ms = 12000,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .buffer_size = 512
+        .buffer_size = 512,
+        .event_handler = heartbeat_http_event,
+        .user_data = &response
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     bool ok = false;
+    bool reboot_requested = false;
     if (client) {
         char authorization[208];
         snprintf(authorization, sizeof(authorization), "Bearer %s", s_device_token);
@@ -827,12 +853,41 @@ static bool send_device_heartbeat(void) {
         esp_err_t err = esp_http_client_perform(client);
         int status = esp_http_client_get_status_code(client);
         ok = (err == ESP_OK && status == 200);
-        if (ok) ESP_LOGI(TAG, "Cloud heartbeat accepted for %s", device_id);
-        else ESP_LOGW(TAG, "Cloud heartbeat failed: %s HTTP %d", esp_err_to_name(err), status);
+        if (ok) {
+            if (response.length > 0) {
+                cJSON *reply = cJSON_ParseWithLength(response.body, response.length);
+                if (cJSON_IsObject(reply)) {
+                    cJSON *leds = cJSON_GetObjectItemCaseSensitive(reply, "led_test");
+                    cJSON *led1 = cJSON_GetObjectItemCaseSensitive(leds, "led1");
+                    cJSON *led5 = cJSON_GetObjectItemCaseSensitive(leds, "led5");
+                    uint8_t rgb[3];
+                    if (cJSON_IsString(led1) && parse_hex_color(led1->valuestring, rgb))
+                        for (int i = 0; i < 3; i++) s_test_led1[i] = rgb[i];
+                    if (cJSON_IsString(led5) && parse_hex_color(led5->valuestring, rgb))
+                        for (int i = 0; i < 3; i++) s_test_led5[i] = rgb[i];
+                    cJSON *command = cJSON_GetObjectItemCaseSensitive(reply, "command");
+                    cJSON *cid = cJSON_GetObjectItemCaseSensitive(command, "id");
+                    cJSON *type = cJSON_GetObjectItemCaseSensitive(command, "type");
+                    if (cJSON_IsString(cid) && cJSON_IsString(type) &&
+                        strcmp(type->valuestring, "reboot") == 0 &&
+                        strlen(cid->valuestring) < sizeof(s_command_ack)) {
+                        strlcpy(s_command_ack, cid->valuestring, sizeof(s_command_ack));
+                        reboot_requested = true;
+                    }
+                }
+                cJSON_Delete(reply);
+            }
+            ESP_LOGI(TAG, "Cloud heartbeat accepted for %s", device_id);
+        } else ESP_LOGW(TAG, "Cloud heartbeat failed: %s HTTP %d", esp_err_to_name(err), status);
         esp_http_client_cleanup(client);
     }
     free(body);
     if (s_https_mutex) xSemaphoreGive(s_https_mutex);
+    if (reboot_requested) {
+        ESP_LOGW(TAG, "Administrator requested remote restart; rebooting now");
+        vTaskDelay(pdMS_TO_TICKS(250));
+        esp_restart();
+    }
     return ok;
 }
 
@@ -1063,6 +1118,9 @@ static void ota_task(void *arg) {
     (void)arg;
     vTaskDelay(pdMS_TO_TICKS(30000));
     while (1) {
+        char pending_ota_url[512] = {0};
+        char pending_ota_sha[65] = {0};
+        bool pending_ota = false;
         esp_http_client_config_t cfg = {
             .url = CONFIG_CLEANNET_OTA_MANIFEST_URL,
             .timeout_ms = 25000,
@@ -1082,46 +1140,53 @@ static void ota_task(void *arg) {
                 int status = esp_http_client_get_status_code(client);
                 if (status == 200 && length <= 1024) {
                     char body[1025] = {0};
-                    {
-                        int total = 0;
-                        bool read_ok = true;
-                        while (total < 1024) {
-                            int n = esp_http_client_read(client, body + total, 1024 - total);
-                            if (n < 0) { read_ok = false; break; }
-                            if (n == 0) break;
-                            total += n;
-                        }
-                        bool complete = read_ok && total > 0 &&
-                            (length <= 0 || total == length) && total < 1024;
-                        if (complete) {
-                            cJSON *root = cJSON_ParseWithLength(body, (size_t)total);
-                            if (cJSON_IsObject(root)) {
-                                cJSON *enabled = cJSON_GetObjectItemCaseSensitive(root, "enabled");
-                                cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
-                                cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");
-                                cJSON *sha = cJSON_GetObjectItemCaseSensitive(root, "sha256");
-                                if (cJSON_IsTrue(enabled) && cJSON_IsString(version) &&
-                                    cJSON_IsString(url) && cJSON_IsString(sha)) {
-                                    if (version_is_newer(version->valuestring, DEVICE_VERSION)) {
+                    int total = 0;
+                    bool read_ok = true;
+                    while (total < 1024) {
+                        int n = esp_http_client_read(client, body + total, 1024 - total);
+                        if (n < 0) { read_ok = false; break; }
+                        if (n == 0) break;
+                        total += n;
+                    }
+                    bool complete = read_ok && total > 0 &&
+                        (length <= 0 || total == length) && total < 1024;
+                    if (complete) {
+                        cJSON *root = cJSON_ParseWithLength(body, (size_t)total);
+                        if (cJSON_IsObject(root)) {
+                            cJSON *enabled = cJSON_GetObjectItemCaseSensitive(root, "enabled");
+                            cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
+                            cJSON *url = cJSON_GetObjectItemCaseSensitive(root, "url");
+                            cJSON *sha = cJSON_GetObjectItemCaseSensitive(root, "sha256");
+                            if (cJSON_IsTrue(enabled) && cJSON_IsString(version) &&
+                                cJSON_IsString(url) && cJSON_IsString(sha)) {
+                                if (version_is_newer(version->valuestring, DEVICE_VERSION)) {
+                                    size_t url_len = strlen(url->valuestring);
+                                    size_t sha_len = strlen(sha->valuestring);
+                                    if (url_len > 0 && url_len < sizeof(pending_ota_url) && sha_len == 64) {
+                                        memcpy(pending_ota_url, url->valuestring, url_len + 1);
+                                        memcpy(pending_ota_sha, sha->valuestring, sizeof(pending_ota_sha));
+                                        pending_ota = true;
                                         ESP_LOGW(TAG, "New OTA release %s available (current %s)",
                                             version->valuestring, DEVICE_VERSION);
-                                        ota_download_and_install(url->valuestring, sha->valuestring);
                                     } else {
-                                        ESP_LOGI(TAG, "OTA manifest OK; device version %s is up to date",
-                                            DEVICE_VERSION);
+                                        ESP_LOGE(TAG, "OTA manifest URL/SHA length invalid");
                                     }
-                                } else if (cJSON_IsFalse(enabled)) {                                    ESP_LOGI(TAG, "OTA manifest OK; no firmware release is currently published");
                                 } else {
-                                    ESP_LOGW(TAG, "OTA manifest JSON missing required fields");
+                                    ESP_LOGI(TAG, "OTA manifest OK; device version %s is up to date",
+                                        DEVICE_VERSION);
                                 }
+                            } else if (cJSON_IsFalse(enabled)) {
+                                ESP_LOGI(TAG, "OTA manifest OK; no firmware release is currently published");
                             } else {
-                                ESP_LOGW(TAG, "OTA manifest response is not valid JSON");
+                                ESP_LOGW(TAG, "OTA manifest JSON missing required fields");
                             }
-                            cJSON_Delete(root);
                         } else {
-                            ESP_LOGW(TAG, "OTA manifest body incomplete/too large/read failed (HTTP %d, Content-Length %d, received %d)",
-                                status, length, total);
+                            ESP_LOGW(TAG, "OTA manifest response is not valid JSON");
                         }
+                        cJSON_Delete(root);
+                    } else {
+                        ESP_LOGW(TAG, "OTA manifest body incomplete/too large/read failed (HTTP %d, Content-Length %d, received %d)",
+                            status, length, total);
                     }
                 } else {
                     ESP_LOGW(TAG, "OTA manifest HTTP %d or manifest too large (Content-Length %d; max 1024)",
@@ -1131,9 +1196,17 @@ static void ota_task(void *arg) {
             } else {
                 ESP_LOGW(TAG, "OTA manifest connection failed: %s", esp_err_to_name(open_err));
             }
+            /* Free the manifest TLS context before allocating the binary TLS context. */
             esp_http_client_cleanup(client);
+            client = NULL;
+            log_ota_heap("after manifest client cleanup");
         } else {
             ESP_LOGW(TAG, "OTA manifest client initialization failed");
+        }
+
+        if (pending_ota) {
+            log_ota_heap("before OTA binary client init");
+            ota_download_and_install(pending_ota_url, pending_ota_sha);
         }
         if (s_https_mutex) xSemaphoreGive(s_https_mutex);
         vTaskDelay(pdMS_TO_TICKS(CONFIG_CLEANNET_OTA_CHECK_SECONDS * 1000ULL));

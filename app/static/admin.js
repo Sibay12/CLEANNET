@@ -36,12 +36,26 @@ async function load(){
    const lanIp=x.lan_ip||'LAN IP unavailable';
    const coord=Number.isFinite(Number(x.latitude))&&Number.isFinite(Number(x.longitude))?'<br><small>'+Number(x.latitude).toFixed(4)+', '+Number(x.longitude).toFixed(4)+'</small>':'';
    const live=isOnline(x),state=x.status+' · '+(live?'Online':'Offline');
-   return '<tr><td><b>'+esc(x.device_id)+'</b><br><small>'+esc(x.hardware_model||'ESP32-C3')+'</small></td><td><span class="pill">'+esc(state)+'</span></td><td>'+esc(x.claimed_by||'—')+'</td><td>'+esc(seen)+'</td><td>'+esc(place)+'<br><small>LAN: '+esc(lanIp)+'</small><br><small>Public: '+esc(publicIp)+'</small>'+coord+'</td><td><button class="btn secondary rotate-device-token" data-device="'+esc(x.device_id)+'" type="button">Rotate token</button></td></tr>'
+   const ledCfg=x.led_test||{led1:'#ff00ff',led5:'#00ffff'};
+   return '<tr><td><b>'+esc(x.device_id)+'</b><br><small>'+esc(x.hardware_model||'ESP32-C3')+'</small></td><td><span class="pill">'+esc(state)+'</span></td><td>'+esc(x.claimed_by||'—')+'</td><td>'+esc(seen)+'</td><td>'+esc(place)+'<br><small>LAN: '+esc(lanIp)+'</small><br><small>Public: '+esc(publicIp)+'</small>'+coord+'</td><td><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center"><button class="btn secondary restart-device" data-device="'+esc(x.device_id)+'" type="button">↻ Restart</button><button class="btn secondary rotate-device-token" data-device="'+esc(x.device_id)+'" type="button">Rotate token</button></div><div style="display:flex;gap:8px;align-items:center;flex-wrap:wrap;margin-top:8px"><label style="font-size:11px">LED A <input class="led-color" data-device="'+esc(x.device_id)+'" data-led="led1" type="color" value="'+esc(ledCfg.led1)+'" aria-label="LED A color"></label><label style="font-size:11px">LED B <input class="led-color" data-device="'+esc(x.device_id)+'" data-led="led5" type="color" value="'+esc(ledCfg.led5)+'" aria-label="LED B color"></label><button class="btn secondary save-led-colors" data-device="'+esc(x.device_id)+'" type="button">Apply colors</button></div></td></tr>'
   }).join(''):'<tr><td colspan="6" class="empty">No devices have been registered yet.</td></tr>';
   document.querySelectorAll('.rotate-device-token').forEach(button=>button.addEventListener('click',()=>rotateDeviceToken(button.dataset.device)));
+  document.querySelectorAll('.restart-device').forEach(button=>button.addEventListener('click',()=>restartDevice(button.dataset.device)));
+  document.querySelectorAll('.save-led-colors').forEach(button=>button.addEventListener('click',()=>saveLedColors(button.dataset.device)));
+
   renderDeviceMap(a);
  }catch(e){note(e.message,true);if(e.message.includes('sign in')||e.message.includes('Session'))showLogin()}
 }
+async function restartDevice(deviceId){
+ if(!confirm('Restart device '+deviceId+'? It will reboot when it receives the next heartbeat.'))return;
+ try{const d=await api('/api/admin/devices/'+encodeURIComponent(deviceId)+'/restart',{method:'POST',body:'{}'});note('Restart command queued for '+deviceId+'. '+d.message); }catch(e){note(e.message,true)}
+}
+async function saveLedColors(deviceId){
+ const fields=[...document.querySelectorAll('.led-color[data-device="'+CSS.escape(deviceId)+'"]')];
+ const payload={led1:fields.find(x=>x.dataset.led==='led1')?.value||'#ff00ff',led5:fields.find(x=>x.dataset.led==='led5')?.value||'#00ffff'};
+ try{await api('/api/admin/devices/'+encodeURIComponent(deviceId)+'/led-test',{method:'PUT',body:JSON.stringify(payload)});note('LED test colors saved for '+deviceId+'. They apply on the device next heartbeat.');}catch(e){note(e.message,true)}
+}
+
 async function rotateDeviceToken(deviceId){
  if(!confirm('Rotate the heartbeat token for '+deviceId+'? The old token will stop working.'))return;
  try{
