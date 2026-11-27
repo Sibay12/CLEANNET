@@ -156,7 +156,7 @@ def get_blocklist(since: int = Query(default=0, ge=0)):
     if since >= version:
         return {"version": version, "not_modified": True, "domains": []}
     return {"version": version, "not_modified": False,
-            "updated_at": doc.get("updated_at"), "domains": doc.get("domains", [])}
+            "updated_at": doc.get("updated_at"), "domains": doc.get("domains", [])[:64]}
 
 
 @app.put("/api/admin/blocklist", dependencies=[Depends(require_admin)])
