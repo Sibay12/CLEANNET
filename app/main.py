@@ -451,6 +451,22 @@ def create_device(payload: DeviceCreate):
             "warning": "Save both tokens now. They are shown only once; only their hashes are stored. Enter the device token in the local CLEANNET setup page."}
 
 
+@app.post("/api/admin/devices/{device_id}/token", dependencies=[Depends(require_admin)])
+def rotate_device_token(device_id: str):
+    """Rotate the device heartbeat credential; the new raw token is returned once."""
+    db = get_db()
+    if not db.devices.find_one({"device_id": device_id}, {"_id": 1}):
+        raise HTTPException(status_code=404, detail="Device not found")
+    token = new_claim_token()
+    now = datetime.now(timezone.utc).isoformat()
+    db.devices.update_one(
+        {"device_id": device_id},
+        {"$set": {"device_token_hash": hash_token(token), "updated_at": now}},
+    )
+    return {"ok": True, "device_id": device_id, "device_token": token,
+            "warning": "The previous device token is now invalid. Save this new token; it is shown only once."}
+
+
 @app.get("/api/admin/devices", dependencies=[Depends(require_admin)])
 def list_devices(limit: int = Query(default=50, ge=1, le=200)):
     cursor = get_db().devices.find({}, {"_id": 0, "claim_token_hash": 0, "device_token_hash": 0}).sort("created_at", -1).limit(limit)
