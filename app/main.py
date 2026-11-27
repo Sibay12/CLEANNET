@@ -395,18 +395,36 @@ def device_heartbeat(
         "updated_at": now,
     }
     previous_ip = device.get("public_ip")
+    unset_fields = {}
     if public_ip:
         updates["public_ip"] = public_ip
-        if public_ip != previous_ip or device.get("latitude") is None:
+        last_attempt = device.get("geo_lookup_attempted_at")
+        retry_geo = not last_attempt
+        if last_attempt:
+            try:
+                attempted_at = datetime.fromisoformat(str(last_attempt).replace("Z", "+00:00"))
+                retry_geo = (datetime.now(timezone.utc) - attempted_at).total_seconds() >= 21600
+            except ValueError:
+                retry_geo = True
+        if public_ip != previous_ip or (device.get("latitude") is None and retry_geo):
+            updates["geo_lookup_attempted_at"] = now
             location = _lookup_ip_location(public_ip)
             if location:
                 updates.update(location)
                 updates["location_updated_at"] = now
+                updates["location_status"] = "approximate"
             else:
                 updates["location_status"] = "IP location unavailable"
+                if public_ip != previous_ip:
+                    unset_fields = {"latitude": "", "longitude": "", "city": "", "region": "",
+                                    "country": "", "postal": "", "timezone": "",
+                                    "location_source": "", "location_provider": ""}
+    update_doc = {"$set": updates}
+    if unset_fields:
+        update_doc["$unset"] = unset_fields
     result = db.devices.update_one(
         {"device_id": payload.device_id, "device_token_hash": device["device_token_hash"], "status": {"$ne": "blocked"}},
-        {"$set": updates},
+        update_doc,
     )
     if result.modified_count != 1:
         raise HTTPException(status_code=409, detail="Device record changed; retry heartbeat")
