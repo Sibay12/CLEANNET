@@ -57,6 +57,9 @@
 #ifndef CONFIG_CLEANNET_OTA_CHECK_SECONDS
 #define CONFIG_CLEANNET_OTA_CHECK_SECONDS 21600
 #endif
+#ifndef CONFIG_CLEANNET_BLOCKLIST_URL
+#define CONFIG_CLEANNET_BLOCKLIST_URL "https://cleannet-api-qkv4.onrender.com/api/blocklist?since=0"
+#endif
 
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
@@ -89,6 +92,10 @@ static volatile bool s_ble_ready = false;
 static volatile bool s_router_connected = false;
 static volatile bool s_internet_available = false;
 static volatile bool s_server_available = false;
+static volatile bool s_blocklist_sync_started = false;
+static char s_remote_blocked_domains[64][254];
+static volatile size_t s_remote_blocked_count = 0;
+static uint32_t s_blocklist_version = 0;
 static volatile uint32_t s_dns_total = 0, s_dns_blocked = 0, s_dns_upstream_failures = 0;
 
 /* RHD-320-L addressable LED PCB: WS2812-compatible, 800 kHz, GRB.
@@ -114,13 +121,17 @@ static const char *BLOCKED_DOMAINS[] = {
 };
 static const size_t BLOCKED_COUNT = sizeof(BLOCKED_DOMAINS) / sizeof(BLOCKED_DOMAINS[0]);
 
+static bool domain_matches_suffix(const char *name, const char *blocked) {
+    size_t n = strlen(name), b = strlen(blocked);
+    return (n == b && strcasecmp(name, blocked) == 0) ||
+           (n > b && name[n - b - 1] == '.' && strcasecmp(name + n - b, blocked) == 0);
+}
 static bool domain_is_blocked(const char *name) {
-    for (size_t i = 0; i < BLOCKED_COUNT; i++) {
-        const char *blocked = BLOCKED_DOMAINS[i];
-        size_t n = strlen(name), b = strlen(blocked);
-        if ((n == b && strcasecmp(name, blocked) == 0) ||
-            (n > b && name[n - b - 1] == '.' && strcasecmp(name + n - b, blocked) == 0)) return true;
-    }
+    for (size_t i = 0; i < BLOCKED_COUNT; i++)
+        if (domain_matches_suffix(name, BLOCKED_DOMAINS[i])) return true;
+    size_t count = s_remote_blocked_count;
+    for (size_t i = 0; i < count; i++)
+        if (domain_matches_suffix(name, s_remote_blocked_domains[i])) return true;
     return false;
 }
 static bool get_query_name(const uint8_t *packet, size_t len, char *out, size_t out_len) {
@@ -167,6 +178,85 @@ static bool forward_dns(const uint8_t *query, size_t query_len, uint8_t *reply, 
     }
     close(upstream);
     return ok;
+}
+
+static bool sync_remote_blocklist(void) {
+    if (!s_router_connected || !s_internet_available) return false;
+    if (s_https_mutex) xSemaphoreTake(s_https_mutex, portMAX_DELAY);
+    esp_http_client_config_t cfg = {
+        .url = CONFIG_CLEANNET_BLOCKLIST_URL,
+        .timeout_ms = 15000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = 1024
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    bool ok = false;
+    char *body = (char *)malloc(8193);
+    if (client && body) {
+        esp_err_t err = esp_http_client_open(client, 0);
+        if (err == ESP_OK) {
+            int content_length = esp_http_client_fetch_headers(client);
+            int status = esp_http_client_get_status_code(client);
+            size_t total = 0;
+            if (status == 200 && (content_length <= 0 || content_length <= 8192)) {
+                while (total < 8192) {
+                    int n = esp_http_client_read(client, body + total, 8192 - total);
+                    if (n < 0) break;
+                    if (n == 0) { ok = true; break; }
+                    total += (size_t)n;
+                    if (content_length > 0 && total == (size_t)content_length) { ok = true; break; }
+                }
+            }
+            esp_http_client_close(client);
+            if (ok && total > 0 && total < 8192) {
+                cJSON *root = cJSON_ParseWithLength(body, total);
+                cJSON *domains = cJSON_GetObjectItemCaseSensitive(root, "domains");
+                cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
+                if (cJSON_IsObject(root) && cJSON_IsArray(domains)) {
+                    char next[64][254];
+                    size_t count = 0;
+                    int nitems = cJSON_GetArraySize(domains);
+                    if (nitems > 64) nitems = 64;
+                    for (int i = 0; i < nitems; i++) {
+                        cJSON *item = cJSON_GetArrayItem(domains, i);
+                        if (!cJSON_IsString(item) || !item->valuestring) continue;
+                        size_t len = strlen(item->valuestring);
+                        if (len == 0 || len > 253) continue;
+                        memcpy(next[count], item->valuestring, len + 1);
+                        count++;
+                    }
+                    memcpy(s_remote_blocked_domains, next, count * sizeof(next[0]));
+                    s_remote_blocked_count = count;
+                    if (cJSON_IsNumber(version)) s_blocklist_version = (uint32_t)version->valuedouble;
+                    ESP_LOGI(TAG, "Central blocklist synced: %u domains (version %u)",
+                        (unsigned)count, (unsigned)s_blocklist_version);
+                } else {
+                    ok = false;
+                    ESP_LOGW(TAG, "Central blocklist response JSON invalid");
+                }
+                cJSON_Delete(root);
+            } else {
+                ok = false;
+                ESP_LOGW(TAG, "Central blocklist HTTP %d or incomplete response (%u bytes)",
+                    status, (unsigned)total);
+            }
+        } else {
+            ESP_LOGW(TAG, "Central blocklist HTTPS failed: %s", esp_err_to_name(err));
+        }
+    }
+    if (body) free(body);
+    if (client) esp_http_client_cleanup(client);
+    if (s_https_mutex) xSemaphoreGive(s_https_mutex);
+    return ok;
+}
+
+static void blocklist_sync_task(void *arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(12000));
+    while (1) {
+        sync_remote_blocklist();
+        vTaskDelay(pdMS_TO_TICKS(21600000));
+    }
 }
 
 static void dns_server_task(void *arg) {
@@ -676,6 +766,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
         if (!s_dns_started) {
             BaseType_t dns_task = xTaskCreate(dns_server_task, "cleannet_dns", 6144, NULL, 5, NULL);
             if (dns_task != pdPASS) ESP_LOGE(TAG, "Could not create DNS task");
+        }
+        if (!s_blocklist_sync_started) {
+            BaseType_t sync_task_created = xTaskCreate(blocklist_sync_task, "cleannet_blocklist", 6144, NULL, 3, NULL);
+            if (sync_task_created == pdPASS) s_blocklist_sync_started = true;
+            else ESP_LOGE(TAG, "Could not create central blocklist sync task");
         }
         if (!s_ota_started) {
             BaseType_t ota_task_created = xTaskCreate(ota_task, "cleannet_ota", 8192, NULL, 4, NULL);
