@@ -3,10 +3,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 import re
 import json
+import ipaddress
 import urllib.request
 import urllib.error
 
-from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Response
+from fastapi import Cookie, Depends, FastAPI, Header, HTTPException, Query, Request, Response
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -35,6 +36,15 @@ class CustomerRegister(BaseModel):
 class ClaimInput(BaseModel):
     device_id: str = Field(min_length=4, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
     claim_token: str = Field(min_length=20, max_length=200)
+
+class DeviceHeartbeat(BaseModel):
+    device_id: str = Field(min_length=17, max_length=17, pattern=r"^(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2}$")
+    firmware: str = Field(default="unknown", max_length=32)
+    wifi: str = Field(default="unknown", max_length=24)
+    lan_ip: str = Field(default="", max_length=45)
+    dns_total: int = Field(default=0, ge=0)
+    dns_blocked: int = Field(default=0, ge=0)
+
 
 class BlocklistUpdate(BaseModel):
     domains: list[str] = Field(min_length=1, max_length=1000)
@@ -201,7 +211,7 @@ def review_domains(payload: DomainReviewInput):
     )
     body = json.dumps({"contents":[{"parts":[{"text":prompt}]}],
                        "generationConfig":{"temperature":0.1,"responseMimeType":"application/json"}}).encode()
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
     req = urllib.request.Request(url, data=body, headers={"Content-Type":"application/json", "x-goog-api-key": settings.gemini_api_key}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
@@ -288,7 +298,7 @@ def customer_me(email: str = Depends(require_customer)):
     customer = get_db().customers.find_one({"email": email}, {"_id": 0, "password_hash": 0})
     if not customer:
         raise HTTPException(status_code=404, detail="Customer account not found")
-    devices = list(get_db().devices.find({"claimed_by": email}, {"_id": 0, "claim_token_hash": 0}).sort("created_at", -1))
+    devices = list(get_db().devices.find({"claimed_by": email}, {"_id": 0, "claim_token_hash": 0, "device_token_hash": 0}).sort("created_at", -1))
     return {"customer": customer, "devices": devices}
 
 
@@ -307,25 +317,125 @@ def claim_device(payload: ClaimInput, email: str = Depends(require_customer)):
     return {"ok": True, "device_id": payload.device_id, "status": "claimed"}
 
 
+def _public_client_ip(request: Request) -> str | None:
+    # Render's Cloudflare edge supplies CF-Connecting-IP. Do not trust arbitrary
+    # left-most X-Forwarded-For values because clients can spoof that header.
+    candidates = [request.headers.get("cf-connecting-ip"), request.client.host if request.client else None]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        try:
+            address = ipaddress.ip_address(candidate.strip())
+            if address.is_global:
+                return str(address)
+        except ValueError:
+            continue
+    return None
+
+
+def _lookup_ip_location(public_ip: str) -> dict | None:
+    """Approximate public-IP geolocation. Private/reserved IPs are never queried."""
+    try:
+        request = urllib.request.Request(
+            "https://ipdata.free/" + public_ip,
+            headers={"Accept": "application/json", "User-Agent": "CLEANNET/0.2"},
+        )
+        with urllib.request.urlopen(request, timeout=5) as response:
+            data = json.loads(response.read().decode("utf-8"))
+        latitude = data.get("latitude")
+        longitude = data.get("longitude")
+        if latitude is None or longitude is None:
+            return None
+        latitude, longitude = float(latitude), float(longitude)
+        if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
+            return None
+        return {
+            "latitude": latitude,
+            "longitude": longitude,
+            "city": str(data.get("city") or "")[:100],
+            "region": str(data.get("region") or "")[:100],
+            "country": str(data.get("country") or "")[:100],
+            "postal": str(data.get("postal") or "")[:24],
+            "timezone": str(data.get("timezone") or "")[:80],
+            "location_source": "IP geolocation (approximate)",
+            "location_provider": "ipdata.co",
+        }
+    except (urllib.error.URLError, TimeoutError, ValueError, TypeError, KeyError):
+        return None
+
+
+@app.post("/api/device/heartbeat")
+def device_heartbeat(
+    payload: DeviceHeartbeat,
+    request: Request,
+    authorization: str | None = Header(default=None),
+):
+    """Authenticated ESP32-C3 heartbeat; token is stored hashed and sent only over HTTPS."""
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Device authorization required")
+    raw_token = authorization[7:].strip()
+    if len(raw_token) < 20 or len(raw_token) > 200:
+        raise HTTPException(status_code=401, detail="Invalid device authorization")
+    db = get_db()
+    device = db.devices.find_one({"device_id": payload.device_id})
+    if not device or not hmac_compare(hash_token(raw_token), device.get("device_token_hash", "")):
+        raise HTTPException(status_code=401, detail="Unknown device or invalid device token")
+    if device.get("status") == "blocked":
+        raise HTTPException(status_code=403, detail="Device is blocked")
+    now = datetime.now(timezone.utc).isoformat()
+    public_ip = _public_client_ip(request)
+    updates = {
+        "last_seen": now,
+        "firmware": payload.firmware,
+        "wifi_status": payload.wifi,
+        "lan_ip": payload.lan_ip,
+        "dns_total": payload.dns_total,
+        "dns_blocked": payload.dns_blocked,
+        "heartbeat_interval_seconds": 900,
+        "updated_at": now,
+    }
+    previous_ip = device.get("public_ip")
+    if public_ip:
+        updates["public_ip"] = public_ip
+        if public_ip != previous_ip or device.get("latitude") is None:
+            location = _lookup_ip_location(public_ip)
+            if location:
+                updates.update(location)
+                updates["location_updated_at"] = now
+            else:
+                updates["location_status"] = "IP location unavailable"
+    result = db.devices.update_one(
+        {"device_id": payload.device_id, "device_token_hash": device["device_token_hash"], "status": {"$ne": "blocked"}},
+        {"$set": updates},
+    )
+    if result.modified_count != 1:
+        raise HTTPException(status_code=409, detail="Device record changed; retry heartbeat")
+    return {"ok": True, "device_id": payload.device_id, "last_seen": now,
+            "location_source": updates.get("location_source", device.get("location_source", "pending"))}
+
+
 @app.post("/api/admin/devices", dependencies=[Depends(require_admin)], status_code=201)
 def create_device(payload: DeviceCreate):
     db = get_db()
     token = new_claim_token()
+    device_token = new_claim_token()
     now = datetime.now(timezone.utc).isoformat()
     doc = {"device_id": payload.device_id, "hardware_model": payload.hardware_model, "notes": payload.notes,
-           "status": "inventory", "claim_token_hash": hash_token(token), "claimed_by": None,
+           "status": "inventory", "claim_token_hash": hash_token(token),
+           "device_token_hash": hash_token(device_token), "claimed_by": None,
            "created_at": now, "updated_at": now}
     try:
         db.devices.insert_one(doc)
     except DuplicateKeyError:
         raise HTTPException(status_code=409, detail="Device ID already exists")
     return {"device_id": payload.device_id, "status": "inventory", "claim_token": token,
-            "warning": "Save this token now. It is shown only once; only its hash is stored."}
+            "device_token": device_token,
+            "warning": "Save both tokens now. They are shown only once; only their hashes are stored. Enter the device token in the local CLEANNET setup page."}
 
 
 @app.get("/api/admin/devices", dependencies=[Depends(require_admin)])
 def list_devices(limit: int = Query(default=50, ge=1, le=200)):
-    cursor = get_db().devices.find({}, {"_id": 0, "claim_token_hash": 0}).sort("created_at", -1).limit(limit)
+    cursor = get_db().devices.find({}, {"_id": 0, "claim_token_hash": 0, "device_token_hash": 0}).sort("created_at", -1).limit(limit)
     devices = list(cursor)
     return {"devices": devices, "count": len(devices)}
 
