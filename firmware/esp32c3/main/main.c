@@ -65,6 +65,8 @@ static led_strip_handle_t s_led_strip = NULL;
 typedef enum { LED_OTA_IDLE = 0, LED_OTA_RECEIVING, LED_OTA_VERIFYING, LED_OTA_INSTALLING, LED_OTA_READY } led_ota_state_t;
 static volatile led_ota_state_t s_led_ota_state = LED_OTA_IDLE;
 static volatile TickType_t s_pairing_until = 0;
+static volatile bool s_pairing_active = false;
+static httpd_handle_t s_setup_httpd = NULL;
 static volatile bool s_router_connected = false;
 static volatile bool s_internet_available = false;
 static volatile bool s_server_available = false;
@@ -337,6 +339,9 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     cfg.sta.pmf_cfg.capable = true; cfg.sta.pmf_cfg.required = false;
     esp_wifi_disconnect();
     esp_wifi_set_config(WIFI_IF_STA, &cfg);
+    /* Keep Setup AP available briefly so the phone can receive connection status. */
+    s_pairing_until = xTaskGetTickCount() + pdMS_TO_TICKS(180000);
+    start_setup_ap();
     esp_wifi_connect();
     cJSON_Delete(json);
     httpd_resp_set_type(req, "application/json");
@@ -352,6 +357,7 @@ static bool uri_match_ignore_query(const char *registered_uri, const char *reque
 }
 
 static void start_setup_server(void) {
+    if (s_setup_httpd) return;
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.server_port = 80;
     config.max_uri_handlers = 8;
@@ -363,6 +369,7 @@ static void start_setup_server(void) {
         return;
     }
 
+    s_setup_httpd = server;
     const httpd_uri_t routes[] = {
         {.uri="/", .method=HTTP_GET, .handler=root_handler},
         {.uri="/status", .method=HTTP_GET, .handler=status_page_handler},
@@ -383,6 +390,7 @@ static void start_setup_server(void) {
 }
 
 static void start_setup_ap(void) {
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
     uint8_t mac[6] = {0}; esp_read_mac(mac, ESP_MAC_WIFI_SOFTAP);
     snprintf(s_setup_ssid, sizeof(s_setup_ssid), "%s-%02X%02X", CONFIG_CLEANNET_SETUP_AP_SSID, mac[4], mac[5]);
     snprintf(s_setup_password, sizeof(s_setup_password), "CN%02X%02X%02X", mac[3], mac[4], mac[5]);
@@ -392,7 +400,19 @@ static void start_setup_ap(void) {
     ap.ap.ssid_len = strlen(s_setup_ssid); ap.ap.channel = 1; ap.ap.max_connection = 4;
     ap.ap.authmode = WIFI_AUTH_WPA2_PSK;
     ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_AP, &ap));
-    ESP_LOGI(TAG, "Setup Wi-Fi: %s | Password: %s | Open http://192.168.4.1", s_setup_ssid, s_setup_password);
+    s_pairing_active = true;
+    ESP_LOGI(TAG, "Pairing Setup Wi-Fi: %s | Password: %s | Open http://192.168.4.1", s_setup_ssid, s_setup_password);
+}
+
+static void stop_setup_ap(void) {
+    if (!s_pairing_active) return;
+    esp_err_t err = esp_wifi_set_mode(WIFI_MODE_STA);
+    if (err == ESP_OK) {
+        s_pairing_active = false;
+        ESP_LOGI(TAG, "Pairing window closed; Setup AP disabled, router Wi-Fi remains active");
+    } else {
+        ESP_LOGE(TAG, "Could not disable Setup AP: %s", esp_err_to_name(err));
+    }
 }
 
 static bool load_wifi_credentials(wifi_config_t *cfg) {
@@ -498,12 +518,14 @@ static void pairing_button_task(void *arg) {
         if (pressed && s_pairing_until == 0 &&
             (xTaskGetTickCount() - pressed_at) >= pdMS_TO_TICKS(3000)) {
             s_pairing_until = xTaskGetTickCount() + pdMS_TO_TICKS(180000);
-            ESP_LOGI(TAG, "PAIR mode active for 180 seconds (purple LED)");
+            start_setup_ap();
+            ESP_LOGI(TAG, "PAIR mode active for 180 seconds (purple LED + Setup AP)");
         }
         if (s_pairing_until != 0 &&
             (int32_t)(xTaskGetTickCount() - s_pairing_until) >= 0) {
             s_pairing_until = 0;
-            ESP_LOGI(TAG, "PAIR indication timeout; returning to network status");
+            stop_setup_ap();
+            ESP_LOGI(TAG, "PAIR mode expired; Setup AP disabled, router STA remains active");
         }
         vTaskDelay(pdMS_TO_TICKS(20));
     }
@@ -817,9 +839,13 @@ void app_main(void) {
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &wifi_event_handler, NULL));
     wifi_config_t sta = {0}; bool have_creds = load_wifi_credentials(&sta);
     if (!have_creds) ESP_LOGW(TAG, "No router credentials saved. Use CLEANNET setup Wi-Fi.");
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_APSTA));
-    if (have_creds) ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
-    start_setup_ap();
+    ESP_ERROR_CHECK(esp_wifi_set_mode(have_creds ? WIFI_MODE_STA : WIFI_MODE_APSTA));
+    if (have_creds) {
+        ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &sta));
+    } else {
+        /* First boot without saved credentials: keep provisioning AP available. */
+        start_setup_ap();
+    }
     ESP_ERROR_CHECK(esp_wifi_start());
     start_setup_server();
     if (have_creds) ESP_ERROR_CHECK(esp_wifi_connect());
