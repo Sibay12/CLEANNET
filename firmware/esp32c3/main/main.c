@@ -21,6 +21,7 @@
 #include "led_strip.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
+#include "esp_heap_caps.h"
 #include "esp_mac.h"
 #include "esp_err.h"
 #include "esp_http_server.h"
@@ -66,6 +67,15 @@ static const char *TAG = "CLEANNET";
 static EventGroupHandle_t s_wifi_events;
 static bool s_dns_started = false;
 static bool s_ota_started = false;
+
+/* Capture heap headroom around HTTPS/TLS operations for OTA diagnostics. */
+static void log_ota_heap(const char *stage) {
+    size_t free_heap = esp_get_free_heap_size();
+    size_t min_free = esp_get_minimum_free_heap_size();
+    size_t largest = heap_caps_get_largest_free_block(MALLOC_CAP_8BIT);
+    ESP_LOGI(TAG, "OTA heap [%s]: free=%u min_free=%u largest_block=%u",
+        stage, (unsigned)free_heap, (unsigned)min_free, (unsigned)largest);
+}
 static volatile uint32_t s_dns_queries_window = 0;
 static esp_err_t assign_new_wifi_session_mac(void) {
     uint8_t factory_mac[6] = {0};
@@ -147,8 +157,7 @@ static bool get_query_name(const uint8_t *packet, size_t len, char *out, size_t 
         if ((label_len & 0xC0) != 0 || label_len > 63 || pos + label_len > len) return false;
         if (used) { if (used + 1 >= out_len) return false; out[used++] = '.'; }
         if (used + label_len >= out_len) return false;
-        for (uint8_t i = 0; i < label_len; i++) {
-            char c = (char)packet[pos++];
+        for (uint8_t i = 0; i < label_len; i++) {            char c = (char)packet[pos++];
             out[used++] = (c >= 'A' && c <= 'Z') ? (char)(c + 32) : c;
         }
     }
@@ -297,8 +306,7 @@ static esp_err_t capabilities_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
     esp_err_t result = httpd_resp_sendstr(req, body ? body : "{}");
-    free(body);
-    cJSON_Delete(root);
+    free(body);    cJSON_Delete(root);
     return result;
 }
 
@@ -447,7 +455,6 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     httpd_resp_set_type(req, "application/json");
     return httpd_resp_sendstr(req, "{\"ok\":true,\"message\":\"Credentials saved. CLEANNET is connecting; check serial monitor for its LAN IP.\"}");
 }
-
 /* Ignore query strings added by browsers or link wrappers when matching routes. */
 static bool uri_match_ignore_query(const char *registered_uri, const char *request_uri, size_t request_uri_len) {
     const char *query = memchr(request_uri, '?', request_uri_len);
@@ -597,8 +604,7 @@ static void indicators_task(void *arg) {
         led_set_rgb(r, g, b);
         if (s_led_ota_state == LED_OTA_READY) vTaskDelay(pdMS_TO_TICKS(100));
         else vTaskDelay(pdMS_TO_TICKS(period_ms));
-    }
-}
+    }}
 
 
 /* Hold the physical PAIR button for 3 seconds to show pairing mode for 3 minutes.
@@ -653,8 +659,10 @@ static void server_monitor_task(void *arg) {
                 .timeout_ms=12000,.crt_bundle_attach=esp_crt_bundle_attach,.buffer_size=512};
             esp_http_client_handle_t client=esp_http_client_init(&cfg);
             if (client) {
+                log_ota_heap("before server-monitor HTTPS");
                 esp_err_t err=esp_http_client_perform(client);
                 int status=esp_http_client_get_status_code(client);
+                log_ota_heap("after server-monitor HTTPS");
                 s_server_available=(err==ESP_OK && status==200);
                 ESP_LOGI(TAG,"CLEANNET server check: %s (HTTP %d)",s_server_available?"reachable":"unavailable",status);
                 esp_http_client_cleanup(client);
@@ -676,9 +684,11 @@ static void internet_monitor_task(void *arg) {
                 .crt_bundle_attach = esp_crt_bundle_attach,
                 .buffer_size = 256
             };
+            log_ota_heap("before internet-monitor HTTPS");
             esp_http_client_handle_t client = esp_http_client_init(&cfg);
             if (client) {
                 esp_err_t err = esp_http_client_perform(client);
+                log_ota_heap("after internet-monitor HTTPS");
                 int status = esp_http_client_get_status_code(client);
                 s_internet_available = (err == ESP_OK && (status == 204 || status == 200));
                 esp_http_client_cleanup(client);
@@ -747,8 +757,7 @@ static bool ota_download_and_install(const char *url, const char *expected_sha) 
     esp_err_t err = esp_http_client_open(client, 0);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "OTA binary connection failed: %s", esp_err_to_name(err));
-        esp_http_client_cleanup(client);
-        return false;
+        esp_http_client_cleanup(client);        return false;
     }
 
     int content_length = esp_http_client_fetch_headers(client);
@@ -848,9 +857,13 @@ static void ota_task(void *arg) {
             .crt_bundle_attach = esp_crt_bundle_attach,
             .buffer_size = 1024
         };
+        log_ota_heap("before manifest client init");
         esp_http_client_handle_t client = esp_http_client_init(&cfg);
         if (client) {
+            log_ota_heap("after manifest client init");
+            log_ota_heap("before manifest TLS handshake");
             esp_err_t open_err = esp_http_client_open(client, 0);
+            log_ota_heap(open_err == ESP_OK ? "manifest connected" : "manifest TLS/connect failed");
             if (open_err == ESP_OK) {
                 int length = esp_http_client_fetch_headers(client);
                 int status = esp_http_client_get_status_code(client);
@@ -897,8 +910,7 @@ static void ota_task(void *arg) {
                             ESP_LOGW(TAG, "OTA manifest body incomplete/too large/read failed (HTTP %d, Content-Length %d, received %d)",
                                 status, length, total);
                         }
-                        free(body);
-                    } else {
+                        free(body);                    } else {
                         ESP_LOGE(TAG, "OTA manifest: out of memory");
                     }
                 } else {
