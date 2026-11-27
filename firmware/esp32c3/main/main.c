@@ -61,7 +61,7 @@
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.2.6"
+#define DEVICE_VERSION "0.2.7"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
@@ -499,10 +499,7 @@ static void ota_task(void *arg);
 static void led_set_rgb(uint8_t red, uint8_t green, uint8_t blue) {
     if (!s_led_strip) return;
     for (int i = 0; i < CLEANNET_LED_PIXEL_COUNT; i++) {
-        if (i == CLEANNET_LED_ACTIVE_PIXEL)
-            led_strip_set_pixel(s_led_strip, i, red, green, blue);
-        else
-            led_strip_set_pixel(s_led_strip, i, 0, 0, 0);
+        led_strip_set_pixel(s_led_strip, i, red, green, blue);
     }
     led_strip_refresh(s_led_strip);
 }
