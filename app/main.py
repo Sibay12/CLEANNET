@@ -125,6 +125,20 @@ def firmware_manifest(channel: str = Query(default="stable", min_length=1, max_l
     }
 
 
+@app.get("/api/firmware/download", include_in_schema=False)
+def firmware_download():
+    """Serve the immutable ESP32-C3 OTA application image from this deployment."""
+    firmware_path = Path(__file__).resolve().parents[1] / "firmware" / "releases" / "cleannet_esp32c3_dns.bin"
+    if not firmware_path.is_file():
+        raise HTTPException(status_code=404, detail="Firmware image is not published")
+    return FileResponse(
+        firmware_path,
+        media_type="application/octet-stream",
+        filename="cleannet_esp32c3_dns.bin",
+        headers={"Cache-Control": "public, max-age=31536000, immutable"},
+    )
+
+
 @app.get("/api/blocklist")
 def get_blocklist(since: int = Query(default=0, ge=0)):
     """Return the current shared domain blocklist for ESP32 devices."""
