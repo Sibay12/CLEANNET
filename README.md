@@ -52,6 +52,7 @@ Never commit real credentials, session secrets, payment credentials, device secr
 - `GET /health`, `GET /ready`
 - `POST /api/admin/login`, `GET /api/admin/session`
 - `GET/POST /api/admin/devices` (admin session required)
+- `POST /api/admin/devices/{device_id}/token` (admin-only token rotation; returns the new token once)
 - `POST /api/device/heartbeat` (device Bearer token required; HTTPS only in production)
 - `POST /api/customer/register`, `POST /api/customer/login`
 - `GET /api/customer/me`, `POST /api/customer/claim`
@@ -65,7 +66,7 @@ Camera QR scanning, email verification, password reset, subscriptions, TAKNAPAY 
 
 1. Open the local CLEANNET setup page and copy the read-only **Factory MAC Device ID**. It is read from the ESP32-C3 eFuse with `esp_read_mac(..., ESP_MAC_WIFI_STA)`; the firmware does not call `esp_wifi_set_mac()`.
 2. In Admin → Device registration, register that exact MAC address. The API returns a one-time customer claim token and a separate one-time device heartbeat token. Save both; the backend stores only their hashes.
-3. Paste the **device heartbeat token** into the optional Cloud Device Token field on the local setup page and save/connect. The firmware stores it in NVS and sends it as a Bearer token over HTTPS. Do not share it.
+3. Paste the **device heartbeat token** into the optional Cloud Device Token field on the local setup page and save/connect. It is submitted over the WPA2-protected local setup AP, stored in NVS, and then sent as a Bearer token over HTTPS for cloud heartbeats. Do not share it.
 4. Once connected to the router and internet, firmware 0.2.9 sends a heartbeat every 15 minutes to `POST /api/device/heartbeat`. The heartbeat contains Factory MAC Device ID, firmware version, Wi-Fi state, LAN IP and DNS counters.
 5. The backend records Last Seen and the public client IP. It uses the Render/Cloudflare `CF-Connecting-IP` header when available and does not trust arbitrary left-most `X-Forwarded-For` values. Private/reserved IP addresses are not sent to the geolocation provider.
 6. Public IP geolocation uses [ipdata.co](https://ipdata.co) via `https://ipdata.free/{ip}`. The free city-level tier currently advertises 1,000 city lookups/day and commercial use with attribution; the Admin Panel displays the required provider attribution. Provider limits and terms can change.
@@ -73,7 +74,7 @@ Camera QR scanning, email verification, password reset, subscriptions, TAKNAPAY 
 
 **Location limitations:** IP geolocation is an estimate of the internet connection's network exit, not GPS. Mobile carrier CGNAT, ISP routing, VPNs and corporate networks can place a marker far from the physical device. It cannot identify a home, building or street address. Offline devices cannot send new heartbeats. No GPS hardware or exact live tracking is included.
 
-**Provisioning/security notes:** Device heartbeat is disabled until a device token is entered locally. A MAC address alone is not authentication. Keep the device token private. If a device is blocked in Admin inventory, the heartbeat endpoint rejects it. Rotate/reissue a token only through a future explicit admin workflow; the current create flow displays each token once.
+**Provisioning/security notes:** Device heartbeat is disabled until a device token is entered locally. A MAC address alone is not authentication. Keep the device token private. If a device is blocked in Admin inventory, the heartbeat endpoint rejects it. The Admin Panel can rotate/reissue a heartbeat token for an existing device; rotation immediately invalidates the previous token and displays the new token once.
 
 ## Run locally
 1. Install dependencies: `pip install -r requirements.txt`
