@@ -318,9 +318,16 @@ def claim_device(payload: ClaimInput, email: str = Depends(require_customer)):
 
 
 def _public_client_ip(request: Request) -> str | None:
-    # Render's Cloudflare edge supplies CF-Connecting-IP. Do not trust arbitrary
-    # left-most X-Forwarded-For values because clients can spoof that header.
-    candidates = [request.headers.get("cf-connecting-ip"), request.client.host if request.client else None]
+    # Prefer the edge-provided client address. On Render, use the final
+    # X-Forwarded-For hop (the address appended by the platform proxy), not
+    # the left-most value which may have been supplied by the caller.
+    forwarded = request.headers.get("x-forwarded-for", "")
+    forwarded_last = forwarded.split(",")[-1].strip() if forwarded else None
+    candidates = [
+        request.headers.get("cf-connecting-ip"),
+        forwarded_last,
+        request.client.host if request.client else None,
+    ]
     for candidate in candidates:
         if not candidate:
             continue
@@ -337,11 +344,13 @@ def _lookup_ip_location(public_ip: str) -> dict | None:
     """Approximate public-IP geolocation. Private/reserved IPs are never queried."""
     try:
         request = urllib.request.Request(
-            "https://ipdata.free/" + public_ip,
-            headers={"Accept": "application/json", "User-Agent": "CLEANNET/0.2"},
+            "https://ipwho.is/" + public_ip,
+            headers={"Accept": "application/json", "User-Agent": "CLEANNET/0.3"},
         )
-        with urllib.request.urlopen(request, timeout=5) as response:
+        with urllib.request.urlopen(request, timeout=8) as response:
             data = json.loads(response.read().decode("utf-8"))
+        if data.get("success") is not True:
+            return None
         latitude = data.get("latitude")
         longitude = data.get("longitude")
         if latitude is None or longitude is None:
@@ -349,6 +358,8 @@ def _lookup_ip_location(public_ip: str) -> dict | None:
         latitude, longitude = float(latitude), float(longitude)
         if not (-90 <= latitude <= 90 and -180 <= longitude <= 180):
             return None
+        timezone_data = data.get("timezone") or {}
+        timezone_name = timezone_data.get("id", "") if isinstance(timezone_data, dict) else str(timezone_data)
         return {
             "latitude": latitude,
             "longitude": longitude,
@@ -356,13 +367,12 @@ def _lookup_ip_location(public_ip: str) -> dict | None:
             "region": str(data.get("region") or "")[:100],
             "country": str(data.get("country") or "")[:100],
             "postal": str(data.get("postal") or "")[:24],
-            "timezone": str(data.get("timezone") or "")[:80],
+            "timezone": str(timezone_name or "")[:80],
             "location_source": "IP geolocation (approximate)",
-            "location_provider": "ipdata.co",
+            "location_provider": "ipwho.is",
         }
     except (urllib.error.URLError, TimeoutError, ValueError, TypeError, KeyError):
         return None
-
 
 @app.post("/api/device/heartbeat")
 def device_heartbeat(
