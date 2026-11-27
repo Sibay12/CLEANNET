@@ -27,12 +27,15 @@ async function load(){
   $('#inventory').textContent=a.filter(x=>x.status==='inventory').length;
   $('#claimed').textContent=a.filter(x=>x.status==='claimed').length;
   $('#blocked').textContent=a.filter(x=>x.status==='blocked').length;
+  const isOnline=x=>!!x.last_seen&&(Date.now()-Date.parse(x.last_seen)<30*60*1000);
+  $('#online').textContent=a.filter(isOnline).length;
   $('#rows').innerHTML=a.length?a.map(x=>{
    const place=[x.city,x.region,x.country].filter(Boolean).join(', ')||'Not reported';
    const seen=x.last_seen?new Date(x.last_seen).toLocaleString():'Never';
    const ip=x.public_ip||'Public IP unavailable';
    const coord=Number.isFinite(Number(x.latitude))&&Number.isFinite(Number(x.longitude))?'<br><small>'+Number(x.latitude).toFixed(4)+', '+Number(x.longitude).toFixed(4)+'</small>':'';
-   return '<tr><td><b>'+esc(x.device_id)+'</b><br><small>'+esc(x.hardware_model||'ESP32-C3')+'</small></td><td><span class="pill">'+esc(x.status)+'</span></td><td>'+esc(x.claimed_by||'—')+'</td><td>'+esc(seen)+'</td><td>'+esc(place)+'<br><small>'+esc(ip)+'</small>'+coord+'</td></tr>'
+   const live=isOnline(x),state=x.status+' · '+(live?'Online':'Offline');
+   return '<tr><td><b>'+esc(x.device_id)+'</b><br><small>'+esc(x.hardware_model||'ESP32-C3')+'</small></td><td><span class="pill">'+esc(state)+'</span></td><td>'+esc(x.claimed_by||'—')+'</td><td>'+esc(seen)+'</td><td>'+esc(place)+'<br><small>'+esc(ip)+'</small>'+coord+'</td></tr>'
   }).join(''):'<tr><td colspan="5" class="empty">No devices have been registered yet.</td></tr>';
   renderDeviceMap(a);
  }catch(e){note(e.message,true);if(e.message.includes('sign in')||e.message.includes('Session'))showLogin()}
