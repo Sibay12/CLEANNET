@@ -213,7 +213,7 @@ static bool sync_remote_blocklist(void) {
                 cJSON *domains = cJSON_GetObjectItemCaseSensitive(root, "domains");
                 cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
                 if (cJSON_IsObject(root) && cJSON_IsArray(domains)) {
-                    char next[32][254];
+                    static char next[32][254];
                     size_t count = 0;
                     int nitems = cJSON_GetArraySize(domains);
                     if (nitems > 32) nitems = 32;
