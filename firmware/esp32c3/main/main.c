@@ -78,6 +78,9 @@ static bool s_dns_started = false;
 static bool s_ota_started = false;
 static bool s_heartbeat_started = false;
 static char s_device_token[201] = {0};
+static char s_command_ack[65] = {0};
+static volatile uint8_t s_test_led1[3] = {255, 0, 255};
+static volatile uint8_t s_test_led5[3] = {0, 255, 255};
 
 /* Capture heap headroom around HTTPS/TLS operations for OTA diagnostics. */
 static void log_ota_heap(const char *stage) {
@@ -696,6 +699,10 @@ static void indicators_task(void *arg) {
             continue;
         }
 
+        /* Admin color-test pixels: physical pixel 1 and pixel 5. */
+        led_strip_set_pixel(s_led_strip, 0, s_test_led1[0], s_test_led1[1], s_test_led1[2]);
+        led_strip_set_pixel(s_led_strip, 4, s_test_led5[0], s_test_led5[1], s_test_led5[2]);
+
         /* Status LED1 (physical pixel 2): Router Wi-Fi link. */
         if (s_router_connected) led_set_one(1, 0, 0, 255);
         else led_set_one(1, blink_500 ? 255 : 0, 0, 0);
@@ -757,6 +764,18 @@ static void pairing_button_init(void) {
 }
 
 
+static bool parse_hex_color(const char *hex, uint8_t rgb[3]) {
+    if (!hex || strlen(hex) != 7 || hex[0] != '#') return false;
+    for (int i = 0; i < 3; i++) {
+        char pair[3] = {hex[1 + i * 2], hex[2 + i * 2], 0};
+        char *end = NULL;
+        long value = strtol(pair, &end, 16);
+        if (!end || *end != 0 || value < 0 || value > 255) return false;
+        rgb[i] = (uint8_t)value;
+    }
+    return true;
+}
+
 static bool send_device_heartbeat(void) {
     if (!s_device_token[0] || !s_router_connected || !s_internet_available) return false;
     if (s_https_mutex) xSemaphoreTake(s_https_mutex, portMAX_DELAY);
@@ -785,6 +804,7 @@ static bool send_device_heartbeat(void) {
     cJSON_AddStringToObject(root, "lan_ip", lan_ip);
     cJSON_AddNumberToObject(root, "dns_total", s_dns_total);
     cJSON_AddNumberToObject(root, "dns_blocked", s_dns_blocked);
+    if (s_command_ack[0]) cJSON_AddStringToObject(root, "command_ack", s_command_ack);
     char *body = cJSON_PrintUnformatted(root);
     cJSON_Delete(root);
     if (!body) {
@@ -800,6 +820,7 @@ static bool send_device_heartbeat(void) {
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     bool ok = false;
+    bool reboot_requested = false;
     if (client) {
         char authorization[208];
         snprintf(authorization, sizeof(authorization), "Bearer %s", s_device_token);
@@ -810,12 +831,43 @@ static bool send_device_heartbeat(void) {
         esp_err_t err = esp_http_client_perform(client);
         int status = esp_http_client_get_status_code(client);
         ok = (err == ESP_OK && status == 200);
-        if (ok) ESP_LOGI(TAG, "Cloud heartbeat accepted for %s", device_id);
-        else ESP_LOGW(TAG, "Cloud heartbeat failed: %s HTTP %d", esp_err_to_name(err), status);
+        if (ok) {
+            char response[1024] = {0};
+            int received = esp_http_client_read(client, response, sizeof(response) - 1);
+            if (received > 0) {
+                cJSON *reply = cJSON_ParseWithLength(response, (size_t)received);
+                if (cJSON_IsObject(reply)) {
+                    cJSON *leds = cJSON_GetObjectItemCaseSensitive(reply, "led_test");
+                    cJSON *led1 = cJSON_GetObjectItemCaseSensitive(leds, "led1");
+                    cJSON *led5 = cJSON_GetObjectItemCaseSensitive(leds, "led5");
+                    uint8_t rgb[3];
+                    if (cJSON_IsString(led1) && parse_hex_color(led1->valuestring, rgb))
+                        for (int i = 0; i < 3; i++) s_test_led1[i] = rgb[i];
+                    if (cJSON_IsString(led5) && parse_hex_color(led5->valuestring, rgb))
+                        for (int i = 0; i < 3; i++) s_test_led5[i] = rgb[i];
+                    cJSON *command = cJSON_GetObjectItemCaseSensitive(reply, "command");
+                    cJSON *cid = cJSON_GetObjectItemCaseSensitive(command, "id");
+                    cJSON *type = cJSON_GetObjectItemCaseSensitive(command, "type");
+                    if (cJSON_IsString(cid) && cJSON_IsString(type) &&
+                        strcmp(type->valuestring, "reboot") == 0 &&
+                        strlen(cid->valuestring) < sizeof(s_command_ack)) {
+                        strlcpy(s_command_ack, cid->valuestring, sizeof(s_command_ack));
+                        reboot_requested = true;
+                    }
+                }
+                cJSON_Delete(reply);
+            }
+            ESP_LOGI(TAG, "Cloud heartbeat accepted for %s", device_id);
+        } else ESP_LOGW(TAG, "Cloud heartbeat failed: %s HTTP %d", esp_err_to_name(err), status);
         esp_http_client_cleanup(client);
     }
     free(body);
     if (s_https_mutex) xSemaphoreGive(s_https_mutex);
+    if (reboot_requested) {
+        ESP_LOGW(TAG, "Administrator requested remote restart; rebooting now");
+        vTaskDelay(pdMS_TO_TICKS(250));
+        esp_restart();
+    }
     return ok;
 }
 
