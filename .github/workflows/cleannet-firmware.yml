@@ -1,0 +1,37 @@
+name: CLEANNET ESP32-C3 Firmware Build
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "firmware/esp32c3/**"
+      - ".github/workflows/cleannet-firmware.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build-esp32c3:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Build with ESP-IDF 5.5.6
+        run: |
+          docker run --rm \
+            -v "$PWD/firmware/esp32c3:/project" \
+            -w /project \
+            espressif/idf:v5.5.6 \
+            idf.py build
+
+      - name: Upload firmware build artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: cleannet-esp32c3-firmware-0.2.8
+          path: |
+            firmware/esp32c3/build/*.bin
+            firmware/esp32c3/build/*.elf
+          if-no-files-found: error
+          retention-days: 30
