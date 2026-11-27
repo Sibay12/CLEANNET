@@ -412,22 +412,26 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     strlcpy((char *)cfg.sta.password, password->valuestring, sizeof(cfg.sta.password));
     cfg.sta.threshold.authmode = WIFI_AUTH_OPEN;
     cfg.sta.pmf_cfg.capable = true; cfg.sta.pmf_cfg.required = false;
-    if (s_router_connected) {
-        xEventGroupClearBits(s_wifi_events, BIT0);
-        esp_wifi_disconnect();
-        EventBits_t bits = xEventGroupWaitBits(s_wifi_events, BIT0, pdTRUE, pdFALSE,
-            pdMS_TO_TICKS(5000));
-        if ((bits & BIT0) == 0) {
-            cJSON_Delete(json);
-            return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
-                "Timed out waiting for Wi-Fi disconnect before MAC change");
-        }
-    }
-    err = assign_new_wifi_session_mac();
+    /* Keep the setup AP available while disabling STA so esp_wifi_set_mac is legal. */
+    start_setup_ap();
+    err = esp_wifi_set_mode(WIFI_MODE_AP);
     if (err != ESP_OK) {
         cJSON_Delete(json);
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Could not disable Wi-Fi station interface for MAC change");
+    }
+    err = assign_new_wifi_session_mac();
+    if (err != ESP_OK) {
+        esp_wifi_set_mode(WIFI_MODE_APSTA);
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
             "Could not assign a new Wi-Fi session MAC");
+    }
+    err = esp_wifi_set_mode(WIFI_MODE_APSTA);
+    if (err != ESP_OK) {
+        cJSON_Delete(json);
+        return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
+            "Could not re-enable Wi-Fi station interface");
     }
     err = esp_wifi_set_config(WIFI_IF_STA, &cfg);
     if (err != ESP_OK) {
@@ -982,10 +986,8 @@ void app_main(void) {
         /* First boot without saved credentials: keep provisioning AP available. */
         start_setup_ap();
     }
+    if (have_creds) ESP_ERROR_CHECK(assign_new_wifi_session_mac());
     ESP_ERROR_CHECK(esp_wifi_start());
     start_setup_server();
-    if (have_creds) {
-        ESP_ERROR_CHECK(assign_new_wifi_session_mac());
-        ESP_ERROR_CHECK(esp_wifi_connect());
-    }
+    if (have_creds) ESP_ERROR_CHECK(esp_wifi_connect());
 }
