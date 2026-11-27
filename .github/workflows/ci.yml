@@ -35,18 +35,43 @@ jobs:
           idf.py build
       - name: Publish OTA image into repository for Render hosting
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPOSITORY: ${{ github.repository }}
+          GH_BRANCH: ${{ github.ref_name }}
         shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p firmware/releases
-          cp firmware/esp32c3/build/cleannet_esp32c3_dns.bin firmware/releases/cleannet_esp32c3_dns.bin
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add firmware/releases/cleannet_esp32c3_dns.bin
-          if ! git diff --cached --quiet; then
-            git commit -m "Publish CLEANNET ESP32-C3 OTA firmware image"
-            git push
-          fi
+          python - <<'PY'
+          import base64, json, os, urllib.error, urllib.request
+          path = "firmware/releases/cleannet_esp32c3_dns.bin"
+          with open("firmware/esp32c3/build/cleannet_esp32c3_dns.bin", "rb") as f:
+              encoded = base64.b64encode(f.read()).decode("ascii")
+          api = "https://api.github.com/repos/" + os.environ["GH_REPOSITORY"] + "/contents/" + path
+          headers = {
+              "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+              "Accept": "application/vnd.github+json",
+              "X-GitHub-Api-Version": "2022-11-28",
+              "Content-Type": "application/json",
+          }
+          payload = {
+              "message": "Publish CLEANNET ESP32-C3 OTA firmware [skip ci]",
+              "content": encoded,
+              "branch": os.environ["GH_BRANCH"],
+          }
+          try:
+              req = urllib.request.Request(api, headers=headers)
+              with urllib.request.urlopen(req) as response:
+                  existing = json.loads(response.read().decode("utf-8"))
+              payload["sha"] = existing["sha"]
+          except urllib.error.HTTPError as exc:
+              if exc.code != 404:
+                  raise
+          req = urllib.request.Request(api, data=json.dumps(payload).encode(), headers=headers, method="PUT")
+          with urllib.request.urlopen(req) as response:
+              result = json.loads(response.read().decode("utf-8"))
+          print("Published:", result["content"]["path"])
+          print("Commit:", result["commit"]["sha"])
+          PY
       - name: Upload OTA firmware binary
         uses: actions/upload-artifact@v4
         with:
