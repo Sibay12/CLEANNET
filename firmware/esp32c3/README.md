@@ -1,6 +1,6 @@
 # CLEANNET ESP32-C3 Firmware (Provisioning + DNS + OTA foundation)
 
-Firmware version: **0.2.1**  
+Firmware version: **0.2.9**  
 Target: ESP32-C3 SuperMini, ESP-IDF 5.5.x.
 
 ## Features in this source revision
@@ -10,7 +10,9 @@ Target: ESP32-C3 SuperMini, ESP-IDF 5.5.x.
 - Serves a mobile-friendly modular CLEANNET setup dashboard at `http://192.168.4.1`, with an embedded vector logo/illustration, network scan, password visibility toggle, and connection status feedback.
 - Serves `/status` and `/api/status` on the router LAN IP; route matching ignores browser-added query strings and logs registration failures.
 - Scans nearby 2.4 GHz Wi-Fi networks and displays SSID, RSSI, channel and whether the network is secured.
-- Saves selected router SSID/password in NVS and connects as a station.
+- Reads the immutable Factory STA MAC from ESP32-C3 eFuse and exposes it as the permanent, read-only Device ID; no router-facing MAC override is applied.
+- Saves selected router SSID/password and optional cloud device token in NVS and connects as a station.
+- Sends an authenticated HTTPS heartbeat every 15 minutes when internet is available and a device token has been provisioned.
 - Runs the prototype DNS filter on UDP/53 after the router assigns an IP.
 - Periodically checks the HTTPS Render firmware manifest.
 - Downloads only HTTPS firmware URLs, checks the downloaded image SHA-256 before selecting it as the next boot image, and uses ESP-IDF OTA rollback support.
@@ -35,6 +37,29 @@ After boot, serial output prints a setup SSID and password, for example:
 Connect a phone or PC to that setup Wi-Fi, then open **http://192.168.4.1**. Press Scan, choose the Jio AirFiber 2.4 GHz SSID, enter its password, and press Save & Connect. The setup AP remains available for future reconfiguration. Do not share the setup password or router password.
 
 Once connected, serial output prints the device's DHCP IP address. Test DNS manually on one phone first. Do not change router-wide LAN/DHCP DNS until the one-device test passes.
+
+## Factory MAC Device ID and cloud location heartbeat
+
+The setup page footer displays **Factory MAC Device ID**. Firmware reads it with `esp_read_mac(..., ESP_MAC_WIFI_STA)`, which returns the eFuse-derived factory address. The existing router-facing STA MAC is left unchanged; firmware does not call `esp_wifi_set_mac()`.
+
+### Provision the cloud heartbeat token
+
+1. Power the ESP32-C3 and connect to its CLEANNET setup AP.
+2. Copy the Factory MAC Device ID shown at the bottom of the setup page.
+3. In the CLEANNET Admin Panel, register that exact MAC as the Device ID.
+4. Save the one-time **device heartbeat token** returned by Admin. Do not confuse it with the separate customer claim token.
+5. Reopen the local setup page, paste the device heartbeat token into **Cloud Device Token**, then press Save & Connect. The token is saved in NVS namespace `cleannet`, key `device_token`.
+6. When the device has router Wi-Fi and internet, it sends a Bearer-authenticated HTTPS POST to:
+   
+       https://cleannet-api-qkv4.onrender.com/api/device/heartbeat
+
+The heartbeat includes Factory MAC Device ID, firmware version, Wi-Fi state, LAN IP and DNS counters. The interval is 900 seconds (15 minutes). If no device token is configured or internet is offline, the firmware does not send a heartbeat; it retries its readiness check after 60 seconds.
+
+The backend stores only a hash of the device token. The raw token is stored in device NVS. It is submitted to the device over the WPA2-protected local setup AP (the setup page itself uses local HTTP), then sent to the cloud only in the HTTPS Authorization header. A blocked device is rejected by the API.
+
+### Location accuracy
+
+The backend derives the public client IP from the Render/Cloudflare request metadata and looks it up with ipdata.co. The Admin Panel map shows approximate IP-based coordinates, not GPS. Carrier CGNAT, ISP routing, VPNs and corporate networks can make the marker inaccurate. It cannot identify an exact home/building/street. The geolocation provider attribution is shown in the Admin Panel. No GPS hardware is used.
 
 ## OTA backend configuration
 

@@ -7,7 +7,10 @@ DNS-based network ad-filtering platform built by TAKNA TECHNOLOGY and owned by S
 - Admin username/password login using a signed HttpOnly session cookie
 - Customer email/password registration and login
 - PBKDF2-HMAC-SHA256 password hashing
-- Admin device inventory and one-time claim-token creation
+- Admin device inventory with one-time customer claim token and separate one-time device heartbeat token
+- Factory STA MAC from ESP32-C3 eFuse is the permanent CLEANNET Device ID; router-facing MAC is not overridden
+- Authenticated ESP32-C3 cloud heartbeat every 15 minutes over HTTPS; device token is stored hashed in MongoDB and locally in NVS
+- Approximate public-IP geolocation (city/region/country/latitude/longitude) with an Admin Panel map and online/offline status
 - Customer device claim with atomic database update; claim token is consumed
 - Customer dashboard API for owned devices
 - Public OTA manifest endpoint at `GET /api/firmware/manifest`; disabled until a tested release is published
@@ -49,13 +52,29 @@ Never commit real credentials, session secrets, payment credentials, device secr
 - `GET /health`, `GET /ready`
 - `POST /api/admin/login`, `GET /api/admin/session`
 - `GET/POST /api/admin/devices` (admin session required)
+- `POST /api/admin/devices/{device_id}/token` (admin-only token rotation; returns the new token once)
+- `POST /api/device/heartbeat` (device Bearer token required; HTTPS only in production)
 - `POST /api/customer/register`, `POST /api/customer/login`
 - `GET /api/customer/me`, `POST /api/customer/claim`
 - `POST /api/logout`
 
 Admin and customer sessions are signed, time-limited, HttpOnly, SameSite=Strict cookies. Customer passwords are hashed; plaintext passwords are never stored. QR claim data must contain only device ID and one-time claim token. Wi-Fi credentials are not collected by these web endpoints.
 
-Camera QR scanning, email verification, password reset, subscriptions, TAKNAPAY verification, device heartbeat, and production-grade DNS hardening are not yet implemented. ESP32-C3 Wi-Fi provisioning and OTA source are under hardware validation.
+Camera QR scanning, email verification, password reset, subscriptions, TAKNAPAY verification, and production-grade DNS hardening are not yet implemented. ESP32-C3 Wi-Fi provisioning, the new heartbeat firmware, and OTA source still require an ESP-IDF build and physical hardware validation.
+
+## Factory MAC identity, device heartbeat, and approximate location
+
+1. Open the local CLEANNET setup page and copy the read-only **Factory MAC Device ID**. It is read from the ESP32-C3 eFuse with `esp_read_mac(..., ESP_MAC_WIFI_STA)`; the firmware does not call `esp_wifi_set_mac()`.
+2. In Admin → Device registration, register that exact MAC address. The API returns a one-time customer claim token and a separate one-time device heartbeat token. Save both; the backend stores only their hashes.
+3. Paste the **device heartbeat token** into the optional Cloud Device Token field on the local setup page and save/connect. It is submitted over the WPA2-protected local setup AP, stored in NVS, and then sent as a Bearer token over HTTPS for cloud heartbeats. Do not share it.
+4. Once connected to the router and internet, firmware 0.2.9 sends a heartbeat every 15 minutes to `POST /api/device/heartbeat`. The heartbeat contains Factory MAC Device ID, firmware version, Wi-Fi state, LAN IP and DNS counters.
+5. The backend records Last Seen and the public client IP. It uses the Render/Cloudflare `CF-Connecting-IP` header when available and does not trust arbitrary left-most `X-Forwarded-For` values. Private/reserved IP addresses are not sent to the geolocation provider.
+6. Public IP geolocation uses [ipdata.co](https://ipdata.co) via `https://ipdata.free/{ip}`. The free city-level tier currently advertises 1,000 city lookups/day and commercial use with attribution; the Admin Panel displays the required provider attribution. Provider limits and terms can change.
+7. Admin → Device Location Map shows approximate markers for devices with coordinates. The table shows public IP, city/region/country, coordinates and Last Seen. Devices with a heartbeat in the last 30 minutes are shown as Online.
+
+**Location limitations:** IP geolocation is an estimate of the internet connection's network exit, not GPS. Mobile carrier CGNAT, ISP routing, VPNs and corporate networks can place a marker far from the physical device. It cannot identify a home, building or street address. Offline devices cannot send new heartbeats. No GPS hardware or exact live tracking is included.
+
+**Provisioning/security notes:** Device heartbeat is disabled until a device token is entered locally. A MAC address alone is not authentication. Keep the device token private. If a device is blocked in Admin inventory, the heartbeat endpoint rejects it. The Admin Panel can rotate/reissue a heartbeat token for an existing device; rotation immediately invalidates the previous token and displays the new token once.
 
 ## Run locally
 1. Install dependencies: `pip install -r requirements.txt`
