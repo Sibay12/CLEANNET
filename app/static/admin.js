@@ -32,10 +32,11 @@ async function load(){
   $('#rows').innerHTML=a.length?a.map(x=>{
    const place=[x.city,x.region,x.country].filter(Boolean).join(', ')||'Not reported';
    const seen=x.last_seen?new Date(x.last_seen).toLocaleString():'Never';
-   const ip=x.public_ip||'Public IP unavailable';
+   const publicIp=x.public_ip||'Public IP unavailable';
+   const lanIp=x.lan_ip||'LAN IP unavailable';
    const coord=Number.isFinite(Number(x.latitude))&&Number.isFinite(Number(x.longitude))?'<br><small>'+Number(x.latitude).toFixed(4)+', '+Number(x.longitude).toFixed(4)+'</small>':'';
    const live=isOnline(x),state=x.status+' · '+(live?'Online':'Offline');
-   return '<tr><td><b>'+esc(x.device_id)+'</b><br><small>'+esc(x.hardware_model||'ESP32-C3')+'</small></td><td><span class="pill">'+esc(state)+'</span></td><td>'+esc(x.claimed_by||'—')+'</td><td>'+esc(seen)+'</td><td>'+esc(place)+'<br><small>'+esc(ip)+'</small>'+coord+'</td><td><button class="btn secondary rotate-device-token" data-device="'+esc(x.device_id)+'" type="button">Rotate token</button></td></tr>'
+   return '<tr><td><b>'+esc(x.device_id)+'</b><br><small>'+esc(x.hardware_model||'ESP32-C3')+'</small></td><td><span class="pill">'+esc(state)+'</span></td><td>'+esc(x.claimed_by||'—')+'</td><td>'+esc(seen)+'</td><td>'+esc(place)+'<br><small>LAN: '+esc(lanIp)+'</small><br><small>Public: '+esc(publicIp)+'</small>'+coord+'</td><td><button class="btn secondary rotate-device-token" data-device="'+esc(x.device_id)+'" type="button">Rotate token</button></td></tr>'
   }).join(''):'<tr><td colspan="6" class="empty">No devices have been registered yet.</td></tr>';
   document.querySelectorAll('.rotate-device-token').forEach(button=>button.addEventListener('click',()=>rotateDeviceToken(button.dataset.device)));
   renderDeviceMap(a);
@@ -51,6 +52,8 @@ async function rotateDeviceToken(deviceId){
  }catch(e){note(e.message,true)}
 }
 function esc(v){return String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function showLogin(){$('#loginpanel').hidden=false;$('#apparea').hidden=true}function showApp(){$('#loginpanel').hidden=true;$('#apparea').hidden=false;load();loadBlocklist()}$('#loginform').onsubmit=async e=>{e.preventDefault();try{await api('/api/admin/login',{method:'POST',body:JSON.stringify({username:$('#username').value,password:$('#password').value})});$('#password').value='';note('Login successful');showApp()}catch(x){note(x.message,true)}};$('#logout').onclick=async()=>{await api('/api/logout',{method:'POST',body:'{}'});showLogin();note('You have been logged out.')};$('#register').onclick=async()=>{const id=$('#deviceid').value.trim().toUpperCase();if(!id)return note('Factory MAC Device ID is required.',true);try{const d=await api('/api/admin/devices',{method:'POST',body:JSON.stringify({device_id:id,hardware_model:'ESP32-C3-SuperMini',notes:$('#notes').value.trim()})});$('#claimtoken').textContent=d.claim_token;$('#devicetoken').textContent=d.device_token;$('#tokenbox').style.display='block';$('#deviceid').value='';$('#notes').value='';note('Device registered. Save both one-time tokens; enter the device token in local setup.');load()}catch(e){note(e.message,true)}};$('#copytoken').onclick=()=>navigator.clipboard.writeText($('#claimtoken').textContent).then(()=>note('Claim token copied'));$('#copydevicetoken').onclick=()=>navigator.clipboard.writeText($('#devicetoken').textContent).then(()=>note('Device token copied'));$('#refresh').onclick=load;$('#refreshMap').onclick=load;api('/api/admin/session').then(showApp).catch(showLogin);
+// Refresh device presence, IP addresses and map while the dashboard is open.
+setInterval(()=>{if(!$('#apparea').hidden)load()},30000);
 async function loadBlocklist(){try{const d=await api('/api/admin/blocklist');$('#domainlist').value=(d.domains||[]).join('\\n');note('Loaded '+(d.domains||[]).length+' domains (version '+d.version+').')}catch(e){note(e.message,true)}}
 $('#loadblocklist').onclick=loadBlocklist;
 $('#saveblocklist').onclick=async()=>{const domains=[...new Set($('#domainlist').value.split(/[\\s,;]+/).map(x=>x.trim().toLowerCase()).filter(Boolean))];if(!domains.length)return note('Add at least one domain.',true);try{const d=await api('/api/admin/blocklist',{method:'PUT',body:JSON.stringify({domains})});note('Blocklist saved. Version '+d.version+' · '+d.domain_count+' domains.');}catch(e){note(e.message,true)}};
