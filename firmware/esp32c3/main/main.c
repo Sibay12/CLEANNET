@@ -671,7 +671,7 @@ static void indicators_task(void *arg) {
             for (int led = 1; led <= CLEANNET_LED_PIXEL_COUNT; led++) {
                 uint8_t r = 0, g = 0, b = 0;
                 if (s_led_ota_state == LED_OTA_READY) {
-                    b = 255;
+                    if (led == 5) b = 255; /* LED5 alone: verified image / restart pending */
                 } else if (led == active) {
                     if (s_led_ota_state == LED_OTA_VERIFYING) { g = 180; b = 255; }
                     else { b = 255; }
