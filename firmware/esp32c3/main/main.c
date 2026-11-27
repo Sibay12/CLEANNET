@@ -18,6 +18,7 @@
 #include "esp_log.h"
 #include "esp_netif.h"
 #include "driver/gpio.h"
+#include "led_strip.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "esp_mac.h"
@@ -60,16 +61,21 @@ static EventGroupHandle_t s_wifi_events;
 static bool s_dns_started = false;
 static bool s_ota_started = false;
 static volatile uint32_t s_dns_queries_window = 0;
+static led_strip_handle_t s_led_strip = NULL;
+typedef enum { LED_OTA_IDLE = 0, LED_OTA_RECEIVING, LED_OTA_VERIFYING, LED_OTA_INSTALLING, LED_OTA_READY } led_ota_state_t;
+static volatile led_ota_state_t s_led_ota_state = LED_OTA_IDLE;
 static volatile bool s_router_connected = false;
 static volatile bool s_internet_available = false;
 static volatile bool s_server_available = false;
 static volatile uint32_t s_dns_total = 0, s_dns_blocked = 0, s_dns_upstream_failures = 0;
 
-/* Provisional ESP32-C3 SuperMini mapping; verify board wiring before connecting LEDs. */
-#define CLEANNET_LED_GREEN GPIO_NUM_3
-#define CLEANNET_LED_RED GPIO_NUM_4
-#define CLEANNET_LED_DNS GPIO_NUM_5
-#define CLEANNET_LED_ONBOARD GPIO_NUM_8
+/* RHD-320-L addressable LED PCB: WS2812-compatible, 800 kHz, GRB.
+ * Use one pixel (index 0) on the Left PCB; remaining pixels stay off.
+ * GPIO0 remains reserved for the previously planned physical PAIR button. */
+#define CLEANNET_LED_DATA_GPIO GPIO_NUM_3
+#define CLEANNET_LED_PIXEL_COUNT 5
+#define CLEANNET_LED_ACTIVE_PIXEL 0
+#define CLEANNET_PAIR_BUTTON_GPIO GPIO_NUM_0
 static char s_setup_ssid[33];
 static char s_setup_password[17];
 
@@ -401,29 +407,71 @@ static bool load_wifi_credentials(wifi_config_t *cfg) {
 
 static void ota_task(void *arg);
 
-static void indicators_init(void) {
-    const gpio_num_t pins[] = {CLEANNET_LED_GREEN, CLEANNET_LED_RED, CLEANNET_LED_DNS, CLEANNET_LED_ONBOARD};
-    for (size_t i = 0; i < sizeof(pins) / sizeof(pins[0]); i++) {
-        gpio_reset_pin(pins[i]);
-        ESP_ERROR_CHECK(gpio_set_direction(pins[i], GPIO_MODE_OUTPUT));
-        ESP_ERROR_CHECK(gpio_set_level(pins[i], 0));
+static void led_set_rgb(uint8_t red, uint8_t green, uint8_t blue) {
+    if (!s_led_strip) return;
+    for (int i = 0; i < CLEANNET_LED_PIXEL_COUNT; i++) {
+        if (i == CLEANNET_LED_ACTIVE_PIXEL)
+            led_strip_set_pixel(s_led_strip, i, red, green, blue);
+        else
+            led_strip_set_pixel(s_led_strip, i, 0, 0, 0);
     }
+    led_strip_refresh(s_led_strip);
+}
+
+static void indicators_init(void) {
+    led_strip_config_t strip_config = {
+        .strip_gpio_num = CLEANNET_LED_DATA_GPIO,
+        .max_leds = CLEANNET_LED_PIXEL_COUNT,
+        .led_model = LED_MODEL_WS2812,
+        .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
+        .flags.invert_out = false,
+    };
+    led_strip_rmt_config_t rmt_config = {
+        .clk_src = RMT_CLK_SRC_DEFAULT,
+        .resolution_hz = 10 * 1000 * 1000,
+        .mem_block_symbols = 64,
+        .flags.with_dma = false,
+    };
+    ESP_ERROR_CHECK(led_strip_new_rmt_device(&strip_config, &rmt_config, &s_led_strip));
+    ESP_ERROR_CHECK(led_strip_clear(s_led_strip));
 }
 
 static void indicators_task(void *arg) {
     (void)arg;
-    bool dns_led = false, onboard_led = false;
+    TickType_t boot_started = xTaskGetTickCount();
+    bool phase = false;
     while (1) {
-        gpio_set_level(CLEANNET_LED_GREEN, s_router_connected ? 1 : 0);
-        gpio_set_level(CLEANNET_LED_RED, (s_router_connected && !s_internet_available) ? 1 : 0);
-        uint32_t load = s_dns_queries_window;
-        s_dns_queries_window = 0;
-        dns_led = !dns_led;
-        gpio_set_level(CLEANNET_LED_DNS, dns_led ? 1 : 0);
-        onboard_led = !onboard_led;
-        /* Common SuperMini onboard LED is active-low; clone polarity may differ. */
-        gpio_set_level(CLEANNET_LED_ONBOARD, onboard_led ? 0 : 1);
-        vTaskDelay(pdMS_TO_TICKS(load >= 20 ? 120 : 550));
+        TickType_t elapsed = xTaskGetTickCount() - boot_started;
+        uint32_t period_ms = 500;
+        uint8_t r = 0, g = 0, b = 0;
+
+        if (s_led_ota_state == LED_OTA_READY) {
+            r = 0; g = 0; b = 255;              /* verified image, restart pending */
+        } else if (s_led_ota_state == LED_OTA_RECEIVING) {
+            period_ms = 120; phase = !phase;    /* fast blue blink while downloading/writing */
+            if (phase) b = 255;
+        } else if (s_led_ota_state == LED_OTA_VERIFYING) {
+            period_ms = 180;                    /* blue double-flash */
+            uint32_t t = (xTaskGetTickCount() * portTICK_PERIOD_MS) % 1100;
+            if (t < 140 || (t >= 300 && t < 440)) b = 255;
+        } else if (s_led_ota_state == LED_OTA_INSTALLING) {
+            period_ms = 250; phase = !phase;    /* boot partition commit */
+            if (phase) b = 255;
+        } else if (elapsed < pdMS_TO_TICKS(3000)) {
+            r = 255;                            /* booting: steady red */
+        } else if (!s_router_connected || !s_internet_available) {
+            period_ms = 500; phase = !phase;    /* no internet: red blink */
+            if (phase) r = 255;
+        } else if (s_dns_started) {
+            period_ms = 700; phase = !phase;    /* DNS active: green pulse */
+            if (phase) g = 255;
+        } else {
+            g = 255;                            /* internet connected */
+        }
+
+        led_set_rgb(r, g, b);
+        if (s_led_ota_state == LED_OTA_READY) vTaskDelay(pdMS_TO_TICKS(100));
+        else vTaskDelay(pdMS_TO_TICKS(period_ms));
     }
 }
 
@@ -508,6 +556,7 @@ static bool version_is_newer(const char *candidate, const char *current) {
 }
 
 static bool ota_download_and_install(const char *url, const char *expected_sha) {
+    s_led_ota_state = LED_OTA_RECEIVING;
     if (!url || strncmp(url, "https://", 8) != 0 || !expected_sha || strlen(expected_sha) != 64) {
         ESP_LOGE(TAG, "OTA manifest URL or SHA-256 is invalid");
         return false;
@@ -586,6 +635,7 @@ static bool ota_download_and_install(const char *url, const char *expected_sha) 
     esp_http_client_close(client);
     esp_http_client_cleanup(client);
 
+    s_led_ota_state = LED_OTA_VERIFYING;
     if (total == 0 || (content_length > 0 && total != (size_t)content_length)) ok = false;
     char actual[65];
     for (int i = 0; i < 32; i++) snprintf(actual + i * 2, 3, "%02x", digest[i]);
@@ -593,22 +643,28 @@ static bool ota_download_and_install(const char *url, const char *expected_sha) 
     if (strcasecmp(actual, expected_sha) != 0) ok = false;
 
     if (!ok) {
+        s_led_ota_state = LED_OTA_IDLE;
         esp_ota_abort(handle);
         ESP_LOGE(TAG, "OTA download incomplete or SHA-256 verification failed");
         return false;
     }
+    s_led_ota_state = LED_OTA_INSTALLING;
     if (esp_ota_end(handle) != ESP_OK) {
+        s_led_ota_state = LED_OTA_IDLE;
         ESP_LOGE(TAG, "OTA image validation failed");
         return false;
     }
     if (esp_ota_set_boot_partition(partition) != ESP_OK) {
+        s_led_ota_state = LED_OTA_IDLE;
         ESP_LOGE(TAG, "Could not select new OTA boot partition");
         return false;
     }
 
     ESP_LOGW(TAG, "OTA image downloaded and SHA-256 verified (%u bytes). Restarting.",
         (unsigned)total);
-    vTaskDelay(pdMS_TO_TICKS(1000));
+    s_led_ota_state = LED_OTA_READY;
+    vTaskDelay(pdMS_TO_TICKS(1500));
+    led_set_rgb(0, 0, 0);
     esp_restart();
     return true;
 }
