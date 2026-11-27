@@ -189,7 +189,7 @@ def review_domains(payload: DomainReviewInput):
     if not settings.gemini_api_key:
         raise HTTPException(status_code=503, detail="Gemini is not configured. Add GEMINI_API_KEY in Render environment.")
     domains = sorted({d.strip().lower().rstrip(".") for d in payload.domains})
-    if not domains or any(not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}", d) for d in domains):
+    if not domains or any(not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z]{2,63}", d) for d in domains):
         raise HTTPException(status_code=422, detail="One or more domain names are invalid")
     prompt = (
         "Classify each domain for DNS ad/tracker blocking. Return ONLY a JSON array "
