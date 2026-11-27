@@ -44,7 +44,13 @@ class DeviceHeartbeat(BaseModel):
     lan_ip: str = Field(default="", max_length=45)
     dns_total: int = Field(default=0, ge=0)
     dns_blocked: int = Field(default=0, ge=0)
+    command_ack: str = Field(default="", max_length=64)
 
+
+
+class LEDTestConfig(BaseModel):
+    led1: str = Field(default="#ff00ff", pattern=r"^#[0-9A-Fa-f]{6}$")
+    led5: str = Field(default="#00ffff", pattern=r"^#[0-9A-Fa-f]{6}$")
 
 class BlocklistUpdate(BaseModel):
     domains: list[str] = Field(min_length=1, max_length=1000)
@@ -432,14 +438,20 @@ def device_heartbeat(
     update_doc = {"$set": updates}
     if unset_fields:
         update_doc["$unset"] = unset_fields
+    if payload.command_ack and (device.get("pending_command") or {}).get("id") == payload.command_ack:
+        update_doc.setdefault("$unset", {})["pending_command"] = ""
+        updates["last_command_ack"] = payload.command_ack
     result = db.devices.update_one(
         {"device_id": payload.device_id, "device_token_hash": device["device_token_hash"], "status": {"$ne": "blocked"}},
         update_doc,
     )
     if result.modified_count != 1:
         raise HTTPException(status_code=409, detail="Device record changed; retry heartbeat")
+    fresh = db.devices.find_one({"device_id": payload.device_id}, {"_id": 0, "pending_command": 1, "led_test": 1})
+    pending = (fresh or {}).get("pending_command") or {}
     return {"ok": True, "device_id": payload.device_id, "last_seen": now,
-            "location_source": updates.get("location_source", device.get("location_source", "pending"))}
+            "location_source": updates.get("location_source", device.get("location_source", "pending")),
+            "command": pending, "led_test": (fresh or {}).get("led_test", {"led1": "#ff00ff", "led5": "#00ffff"})}
 
 
 @app.post("/api/admin/devices", dependencies=[Depends(require_admin)], status_code=201)
@@ -460,6 +472,33 @@ def create_device(payload: DeviceCreate):
             "device_token": device_token,
             "warning": "Save both tokens now. They are shown only once; only their hashes are stored. Enter the device token in the local CLEANNET setup page."}
 
+
+@app.post("/api/admin/devices/{device_id}/restart", dependencies=[Depends(require_admin)])
+def request_device_restart(device_id: str):
+    """Queue reboot; the device executes it on its next authenticated heartbeat."""
+    from uuid import uuid4
+    db = get_db()
+    now = datetime.now(timezone.utc).isoformat()
+    command = {"id": uuid4().hex, "type": "reboot", "requested_at": now}
+    result = db.devices.update_one({"device_id": device_id}, {"$set": {"pending_command": command, "updated_at": now}})
+    if result.matched_count != 1:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return {"ok": True, "device_id": device_id, "command": command, "message": "Restart queued for next device heartbeat."}
+
+@app.get("/api/admin/devices/{device_id}/led-test", dependencies=[Depends(require_admin)])
+def get_device_led_test(device_id: str):
+    device = get_db().devices.find_one({"device_id": device_id}, {"_id": 0, "led_test": 1})
+    if device is None:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return {"device_id": device_id, "led_test": device.get("led_test", {"led1": "#ff00ff", "led5": "#00ffff"})}
+
+@app.put("/api/admin/devices/{device_id}/led-test", dependencies=[Depends(require_admin)])
+def set_device_led_test(device_id: str, payload: LEDTestConfig):
+    now = datetime.now(timezone.utc).isoformat()
+    result = get_db().devices.update_one({"device_id": device_id}, {"$set": {"led_test": {"led1": payload.led1.lower(), "led5": payload.led5.lower()}, "updated_at": now}})
+    if result.matched_count != 1:
+        raise HTTPException(status_code=404, detail="Device not found")
+    return {"ok": True, "device_id": device_id, "led_test": {"led1": payload.led1.lower(), "led5": payload.led5.lower()}}
 
 @app.post("/api/admin/devices/{device_id}/token", dependencies=[Depends(require_admin)])
 def rotate_device_token(device_id: str):
