@@ -81,6 +81,8 @@ static volatile uint32_t s_dns_total = 0, s_dns_blocked = 0, s_dns_upstream_fail
 #define CLEANNET_PAIR_BUTTON_GPIO GPIO_NUM_0
 static char s_setup_ssid[33];
 static char s_setup_password[17];
+static void start_setup_ap(void);
+static void stop_setup_ap(void);
 
 static const char *BLOCKED_DOMAINS[] = {
     "doubleclick.net", "googlesyndication.com", "googleadservices.com",
