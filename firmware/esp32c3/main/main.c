@@ -776,6 +776,25 @@ static bool parse_hex_color(const char *hex, uint8_t rgb[3]) {
     return true;
 }
 
+typedef struct {
+    char body[1024];
+    size_t length;
+} heartbeat_response_t;
+
+static esp_err_t heartbeat_http_event(esp_http_client_event_t *event) {
+    heartbeat_response_t *response = (heartbeat_response_t *)event->user_data;
+    if (event->event_id == HTTP_EVENT_ON_DATA && response && event->data && event->data_len > 0) {
+        size_t available = sizeof(response->body) - 1 - response->length;
+        size_t copy_len = (size_t)event->data_len < available ? (size_t)event->data_len : available;
+        if (copy_len) {
+            memcpy(response->body + response->length, event->data, copy_len);
+            response->length += copy_len;
+            response->body[response->length] = '\0';
+        }
+    }
+    return ESP_OK;
+}
+
 static bool send_device_heartbeat(void) {
     if (!s_device_token[0] || !s_router_connected || !s_internet_available) return false;
     if (s_https_mutex) xSemaphoreTake(s_https_mutex, portMAX_DELAY);
@@ -812,11 +831,14 @@ static bool send_device_heartbeat(void) {
         return false;
     }
 
+    heartbeat_response_t response = {0};
     esp_http_client_config_t cfg = {
         .url = CONFIG_CLEANNET_HEARTBEAT_URL,
         .timeout_ms = 12000,
         .crt_bundle_attach = esp_crt_bundle_attach,
-        .buffer_size = 512
+        .buffer_size = 512,
+        .event_handler = heartbeat_http_event,
+        .user_data = &response
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     bool ok = false;
@@ -832,10 +854,8 @@ static bool send_device_heartbeat(void) {
         int status = esp_http_client_get_status_code(client);
         ok = (err == ESP_OK && status == 200);
         if (ok) {
-            char response[1024] = {0};
-            int received = esp_http_client_read(client, response, sizeof(response) - 1);
-            if (received > 0) {
-                cJSON *reply = cJSON_ParseWithLength(response, (size_t)received);
+            if (response.length > 0) {
+                cJSON *reply = cJSON_ParseWithLength(response.body, response.length);
                 if (cJSON_IsObject(reply)) {
                     cJSON *leds = cJSON_GetObjectItemCaseSensitive(reply, "led_test");
                     cJSON *led1 = cJSON_GetObjectItemCaseSensitive(leds, "led1");
