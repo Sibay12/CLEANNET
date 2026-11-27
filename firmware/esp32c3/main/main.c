@@ -60,7 +60,7 @@
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.2.3"
+#define DEVICE_VERSION "0.2.4"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
@@ -147,7 +147,6 @@ static bool domain_is_blocked(const char *name) {
     }
     return false;
 }
-
 static bool get_query_name(const uint8_t *packet, size_t len, char *out, size_t out_len) {
     if (len < 17 || out_len < 2) return false;
     size_t pos = 12, used = 0;
@@ -297,8 +296,7 @@ static esp_err_t capabilities_handler(httpd_req_t *req) {
         else if (pin == 20 || pin == 21) { role = "uart_possible"; state = "board_verification_required"; }
         cJSON_AddNumberToObject(item, "gpio", pin);
         cJSON_AddStringToObject(item, "role", role);
-        cJSON_AddStringToObject(item, "state", state);
-        cJSON_AddItemToArray(pins, item);
+        cJSON_AddStringToObject(item, "state", state);        cJSON_AddItemToArray(pins, item);
     }
     cJSON_AddStringToObject(root, "pin_policy",
         "Only board-verified, unreserved GPIOs may be enabled by a future signed OTA configuration. GPIO capabilities vary by board revision.");
@@ -447,8 +445,7 @@ static esp_err_t connect_handler(httpd_req_t *req) {
         return httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR,
             "Could not apply router Wi-Fi settings");
     }
-    /* Keep Setup AP available briefly so the phone can receive connection status. */
-    s_pairing_until = xTaskGetTickCount() + pdMS_TO_TICKS(180000);
+    /* Keep Setup AP available briefly so the phone can receive connection status. */    s_pairing_until = xTaskGetTickCount() + pdMS_TO_TICKS(180000);
     start_setup_ap();
     esp_wifi_connect();
     cJSON_Delete(json);
@@ -597,8 +594,7 @@ static void indicators_task(void *arg) {
         } else if (s_dns_started) {
             period_ms = 700; phase = !phase;    /* DNS active: green pulse */
             if (phase) g = 255;
-        } else {
-            g = 255;                            /* internet connected */
+        } else {            g = 255;                            /* internet connected */
         }
 
         led_set_rgb(r, g, b);
@@ -747,8 +743,7 @@ static bool ota_download_and_install(const char *url, const char *expected_sha) 
         return false;
     }
 
-    esp_http_client_config_t cfg = {
-        .url = url, .timeout_ms = 45000, .crt_bundle_attach = esp_crt_bundle_attach,
+    esp_http_client_config_t cfg = {        .url = url, .timeout_ms = 45000, .crt_bundle_attach = esp_crt_bundle_attach,
         .buffer_size = OTA_BUFFER_SIZE, .keep_alive_enable = true
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
@@ -897,8 +892,7 @@ static void ota_task(void *arg) {
                                         ESP_LOGI(TAG, "OTA manifest OK; device version %s is up to date",
                                             DEVICE_VERSION);
                                     }
-                                } else if (cJSON_IsFalse(enabled)) {
-                                    ESP_LOGI(TAG, "OTA manifest OK; no firmware release is currently published");
+                                } else if (cJSON_IsFalse(enabled)) {                                    ESP_LOGI(TAG, "OTA manifest OK; no firmware release is currently published");
                                 } else {
                                     ESP_LOGW(TAG, "OTA manifest JSON missing required fields");
                                 }
