@@ -2,6 +2,9 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 import re
+import json
+import urllib.request
+import urllib.error
 
 from fastapi import Cookie, Depends, FastAPI, HTTPException, Query, Response
 from fastapi.middleware.cors import CORSMiddleware
@@ -35,6 +38,10 @@ class ClaimInput(BaseModel):
 
 class BlocklistUpdate(BaseModel):
     domains: list[str] = Field(min_length=1, max_length=1000)
+
+
+class DomainReviewInput(BaseModel):
+    domains: list[str] = Field(min_length=1, max_length=50)
 
     @field_validator("domains")
     @classmethod
@@ -165,6 +172,60 @@ def replace_blocklist(payload: BlocklistUpdate):
         upsert=True,
     )
     return {"ok": True, "version": version, "domain_count": len(domains), "updated_at": now}
+
+
+
+@app.get("/api/admin/blocklist", dependencies=[Depends(require_admin)])
+def admin_get_blocklist():
+    doc = get_db().blocklists.find_one({"_id": "global"}, {"_id": 0})
+    return {"version": int((doc or {}).get("version", 0)),
+            "domains": (doc or {}).get("domains", []),
+            "updated_at": (doc or {}).get("updated_at")}
+
+
+@app.post("/api/admin/domain-review", dependencies=[Depends(require_admin)])
+def review_domains(payload: DomainReviewInput):
+    """Ask Gemini to classify candidate domains; never auto-publish its decisions."""
+    if not settings.gemini_api_key:
+        raise HTTPException(status_code=503, detail="Gemini is not configured. Add GEMINI_API_KEY in Render environment.")
+    domains = sorted({d.strip().lower().rstrip(".") for d in payload.domains})
+    if not domains or any(not re.fullmatch(r"(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\\.)+[a-z]{2,63}", d) for d in domains):
+        raise HTTPException(status_code=422, detail="One or more domain names are invalid")
+    prompt = (
+        "Classify each domain for DNS ad/tracker blocking. Return ONLY a JSON array "
+        "of objects with keys domain, decision, confidence, reason. decision must be "
+        "block only when strongly associated with advertising, tracking, telemetry, "
+        "or ad measurement; otherwise allow. Protect content/CDN, login, API, video "
+        "streaming, and core app domains. Never infer that a domain is an ad domain "
+        "from its name alone. confidence is 0 to 1. Domains: " + json.dumps(domains)
+    )
+    body = json.dumps({"contents":[{"parts":[{"text":prompt}]}],
+                       "generationConfig":{"temperature":0.1,"responseMimeType":"application/json"}}).encode()
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=" + settings.gemini_api_key
+    req = urllib.request.Request(url, data=body, headers={"Content-Type":"application/json"}, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=20) as response:
+            result = json.loads(response.read().decode("utf-8"))
+        raw = result["candidates"][0]["content"]["parts"][0]["text"]
+        decisions = json.loads(raw)
+        if not isinstance(decisions, list):
+            raise ValueError("Gemini response is not a JSON array")
+        safe = []
+        for item in decisions:
+            if not isinstance(item, dict) or item.get("domain") not in domains:
+                continue
+            decision = item.get("decision")
+            if decision not in ("block", "allow"):
+                decision = "allow"
+            try:
+                confidence = max(0.0, min(1.0, float(item.get("confidence", 0))))
+            except (TypeError, ValueError):
+                confidence = 0.0
+            safe.append({"domain": item["domain"], "decision": decision,
+                         "confidence": confidence, "reason": str(item.get("reason", ""))[:240]})
+        return {"results": safe, "note": "Review the suggestions before saving the blocklist."}
+    except (urllib.error.URLError, TimeoutError, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="Gemini review failed: " + str(exc)[:180])
 
 
 @app.get("/ready")
