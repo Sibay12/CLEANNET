@@ -61,7 +61,7 @@
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.2.5"
+#define DEVICE_VERSION "0.2.6"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
