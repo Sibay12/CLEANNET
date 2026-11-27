@@ -93,7 +93,7 @@ static volatile bool s_router_connected = false;
 static volatile bool s_internet_available = false;
 static volatile bool s_server_available = false;
 static volatile bool s_blocklist_sync_started = false;
-static char s_remote_blocked_domains[64][254];
+static char s_remote_blocked_domains[32][254];
 static volatile size_t s_remote_blocked_count = 0;
 static uint32_t s_blocklist_version = 0;
 static volatile uint32_t s_dns_total = 0, s_dns_blocked = 0, s_dns_upstream_failures = 0;
@@ -191,16 +191,16 @@ static bool sync_remote_blocklist(void) {
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     bool ok = false;
-    char *body = (char *)malloc(8193);
+    if (esp_get_free_heap_size() < 50000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 16000) {\n        ESP_LOGW(TAG, "Skipping blocklist sync: insufficient heap headroom");\n        if (s_https_mutex) xSemaphoreGive(s_https_mutex);\n        return false;\n    }\n    char *body = (char *)malloc(4097);
     if (client && body) {
         esp_err_t err = esp_http_client_open(client, 0);
         if (err == ESP_OK) {
             int content_length = esp_http_client_fetch_headers(client);
             int status = esp_http_client_get_status_code(client);
             size_t total = 0;
-            if (status == 200 && (content_length <= 0 || content_length <= 8192)) {
-                while (total < 8192) {
-                    int n = esp_http_client_read(client, body + total, 8192 - total);
+            if (status == 200 && (content_length <= 0 || content_length <= 4096)) {
+                while (total < 4096) {
+                    int n = esp_http_client_read(client, body + total, 4096 - total);
                     if (n < 0) break;
                     if (n == 0) { ok = true; break; }
                     total += (size_t)n;
@@ -213,10 +213,10 @@ static bool sync_remote_blocklist(void) {
                 cJSON *domains = cJSON_GetObjectItemCaseSensitive(root, "domains");
                 cJSON *version = cJSON_GetObjectItemCaseSensitive(root, "version");
                 if (cJSON_IsObject(root) && cJSON_IsArray(domains)) {
-                    char next[64][254];
+                    char next[32][254];
                     size_t count = 0;
                     int nitems = cJSON_GetArraySize(domains);
-                    if (nitems > 64) nitems = 64;
+                    if (nitems > 32) nitems = 32;
                     for (int i = 0; i < nitems; i++) {
                         cJSON *item = cJSON_GetArrayItem(domains, i);
                         if (!cJSON_IsString(item) || !item->valuestring) continue;
