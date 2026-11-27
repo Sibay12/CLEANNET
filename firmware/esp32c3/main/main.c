@@ -109,8 +109,6 @@ static volatile uint32_t s_dns_total = 0, s_dns_blocked = 0, s_dns_upstream_fail
  * Physical pixel 1 (power) and pixel 5 are intentionally kept off.
  * GPIO0 remains reserved for the physical PAIR button. */
 #define CLEANNET_LED_DATA_GPIO GPIO_NUM_3
-#define CLEANNET_LED_PIXEL_COUNT 1
-#define CLEANNET_STATUS_LED_COUNT 1
 #define CLEANNET_PAIR_BUTTON_GPIO GPIO_NUM_0
 static char s_setup_ssid[33];
 static char s_setup_password[17];
@@ -630,11 +628,6 @@ static void led_set_rgb(uint8_t red, uint8_t green, uint8_t blue) {
     if (!s_led_strip) return;
     led_strip_set_pixel(s_led_strip, 0, red, green, blue);
     led_strip_refresh(s_led_strip);
-}
-
-static void led_set_one(int led_number, uint8_t red, uint8_t green, uint8_t blue) {
-    if (led_number != 1 || !s_led_strip) return;
-    led_set_rgb(red, green, blue);
 }
 
 static void indicators_init(void) {
