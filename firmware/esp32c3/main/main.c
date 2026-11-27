@@ -68,7 +68,7 @@
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.3.1"
+#define DEVICE_VERSION "0.3.2"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
@@ -79,9 +79,6 @@ static bool s_ota_started = false;
 static bool s_heartbeat_started = false;
 static char s_device_token[201] = {0};
 static char s_command_ack[65] = {0};
-static volatile uint8_t s_test_led1[3] = {255, 0, 255};
-static volatile uint8_t s_test_led5[3] = {0, 255, 255};
-
 /* Capture heap headroom around HTTPS/TLS operations for OTA diagnostics. */
 static void log_ota_heap(const char *stage) {
     size_t free_heap = esp_get_free_heap_size();
@@ -112,8 +109,6 @@ static volatile uint32_t s_dns_total = 0, s_dns_blocked = 0, s_dns_upstream_fail
  * Physical pixel 1 (power) and pixel 5 are intentionally kept off.
  * GPIO0 remains reserved for the physical PAIR button. */
 #define CLEANNET_LED_DATA_GPIO GPIO_NUM_3
-#define CLEANNET_LED_PIXEL_COUNT 5
-#define CLEANNET_STATUS_LED_COUNT 3
 #define CLEANNET_PAIR_BUTTON_GPIO GPIO_NUM_0
 static char s_setup_ssid[33];
 static char s_setup_password[17];
@@ -631,21 +626,14 @@ static void ota_task(void *arg);
 
 static void led_set_rgb(uint8_t red, uint8_t green, uint8_t blue) {
     if (!s_led_strip) return;
-    for (int i = 0; i < CLEANNET_LED_PIXEL_COUNT; i++)
-        led_strip_set_pixel(s_led_strip, i, red, green, blue);
+    led_strip_set_pixel(s_led_strip, 0, red, green, blue);
     led_strip_refresh(s_led_strip);
-}
-
-static void led_set_one(int led_number, uint8_t red, uint8_t green, uint8_t blue) {
-    if (!s_led_strip || led_number < 1 || led_number > CLEANNET_STATUS_LED_COUNT) return;
-    /* Map logical status LEDs 1..3 to physical chain pixels 2..4. */
-    led_strip_set_pixel(s_led_strip, led_number, red, green, blue);
 }
 
 static void indicators_init(void) {
     led_strip_config_t strip_config = {
         .strip_gpio_num = CLEANNET_LED_DATA_GPIO,
-        .max_leds = CLEANNET_LED_PIXEL_COUNT,
+        .max_leds = 1,
         .led_model = LED_MODEL_WS2812,
         .color_component_format = LED_STRIP_COLOR_COMPONENT_FMT_GRB,
         .flags.invert_out = false,
@@ -660,64 +648,37 @@ static void indicators_init(void) {
     ESP_ERROR_CHECK(led_strip_clear(s_led_strip));
 }
 
+/* One-pixel status indicator. Every path yields CPU time to FreeRTOS. */
 static void indicators_task(void *arg) {
     (void)arg;
-    const TickType_t boot_started = xTaskGetTickCount();
-
     while (1) {
         const uint32_t now_ms = xTaskGetTickCount() * portTICK_PERIOD_MS;
-        const bool blink_500 = ((now_ms / 500U) % 2U) == 0U;
-        const bool blink_250 = ((now_ms / 250U) % 2U) == 0U;
-        const bool pulse_700 = ((now_ms / 700U) % 2U) == 0U;
+        const bool blink = ((now_ms / 500U) % 2U) == 0U;
+        const bool pulse = ((now_ms / 700U) % 2U) == 0U;
 
-        /* OTA blue/cyan chase across the three active status LEDs. */
         if (s_led_ota_state != LED_OTA_IDLE) {
-            int active = (int)((now_ms / 180U) % CLEANNET_STATUS_LED_COUNT) + 1;
-            for (int led = 1; led <= CLEANNET_STATUS_LED_COUNT; led++) {
-                uint8_t r = 0, g = 0, b = 0;
-                if (s_led_ota_state == LED_OTA_READY) {
-                    if (led == CLEANNET_STATUS_LED_COUNT) b = 255;
-                } else if (led == active) {
-                    if (s_led_ota_state == LED_OTA_VERIFYING) { g = 180; b = 255; }
-                    else { b = 255; }
-                }
-                led_set_one(led, r, g, b);
-            }
-            led_strip_refresh(s_led_strip);
-            vTaskDelay(pdMS_TO_TICKS(100));
+            if (s_led_ota_state == LED_OTA_READY) led_set_rgb(0, 0, 255);
+            else if (s_led_ota_state == LED_OTA_VERIFYING) led_set_rgb(0, 180, 255);
+            else led_set_rgb(0, 0, blink ? 255 : 25);
+            vTaskDelay(pdMS_TO_TICKS(150));
             continue;
         }
 
-        /* Pairing: purple chase across the three active status LEDs. */
         if (s_pairing_until != 0 &&
             (int32_t)(s_pairing_until - xTaskGetTickCount()) > 0) {
-            int active = (int)((now_ms / 300U) % CLEANNET_STATUS_LED_COUNT) + 1;
-            for (int led = 1; led <= CLEANNET_STATUS_LED_COUNT; led++)
-                led_set_one(led, led == active ? 180 : 0, 0, led == active ? 255 : 0);
-            led_strip_refresh(s_led_strip);
-            vTaskDelay(pdMS_TO_TICKS(100));
+            led_set_rgb(blink ? 180 : 40, 0, blink ? 255 : 80);
+            vTaskDelay(pdMS_TO_TICKS(200));
             continue;
         }
 
-        /* Admin color-test pixels: physical pixel 1 and pixel 5. */
-        led_strip_set_pixel(s_led_strip, 0, s_test_led1[0], s_test_led1[1], s_test_led1[2]);
-        led_strip_set_pixel(s_led_strip, 4, s_test_led5[0], s_test_led5[1], s_test_led5[2]);
+        if (!s_router_connected) led_set_rgb(blink ? 255 : 20, 0, 0);
+        else if (!s_internet_available) led_set_rgb(blink ? 255 : 40, blink ? 70 : 0, 0);
+        else if (s_server_available) led_set_rgb(0, pulse ? 255 : 70, 0);
+        else if (s_dns_started) led_set_rgb(0, 100, pulse ? 255 : 70);
+        else led_set_rgb(0, 0, 255);
 
-        /* Status LED1 (physical pixel 2): Router Wi-Fi link. */
-        if (s_router_connected) led_set_one(1, 0, 0, 255);
-        else led_set_one(1, blink_500 ? 255 : 0, 0, 0);
-
-        /* Status LED2 (physical pixel 3): Internet reachability. */
-        if (s_internet_available) led_set_one(2, 0, pulse_700 ? 255 : 35, 0);
-        else led_set_one(2, blink_500 ? 255 : 0, blink_500 ? 80 : 0, 0);
-
-        /* Status LED3 (physical pixel 4): DNS + Cloud/API combined.
-         * Green=cloud reachable; cyan=DNS active; amber=internet only. */
-        if (s_server_available) led_set_one(3, 0, blink_500 ? 255 : 50, blink_500 ? 80 : 15);
-        else if (s_dns_started) led_set_one(3, 0, pulse_700 ? 180 : 30, pulse_700 ? 255 : 50);
-        else if (s_internet_available) led_set_one(3, blink_500 ? 255 : 0, blink_500 ? 100 : 0, 0);
-        else led_set_one(3, 0, 0, 0);
-
+        /* Critical: always yield so CPU0 IDLE can run and reset the watchdog. */
+        vTaskDelay(pdMS_TO_TICKS(150));
     }
 }
 
@@ -763,18 +724,6 @@ static void pairing_button_init(void) {
     ESP_ERROR_CHECK(gpio_config(&cfg));
 }
 
-
-static bool parse_hex_color(const char *hex, uint8_t rgb[3]) {
-    if (!hex || strlen(hex) != 7 || hex[0] != '#') return false;
-    for (int i = 0; i < 3; i++) {
-        char pair[3] = {hex[1 + i * 2], hex[2 + i * 2], 0};
-        char *end = NULL;
-        long value = strtol(pair, &end, 16);
-        if (!end || *end != 0 || value < 0 || value > 255) return false;
-        rgb[i] = (uint8_t)value;
-    }
-    return true;
-}
 
 typedef struct {
     char body[1024];
@@ -857,14 +806,6 @@ static bool send_device_heartbeat(void) {
             if (response.length > 0) {
                 cJSON *reply = cJSON_ParseWithLength(response.body, response.length);
                 if (cJSON_IsObject(reply)) {
-                    cJSON *leds = cJSON_GetObjectItemCaseSensitive(reply, "led_test");
-                    cJSON *led1 = cJSON_GetObjectItemCaseSensitive(leds, "led1");
-                    cJSON *led5 = cJSON_GetObjectItemCaseSensitive(leds, "led5");
-                    uint8_t rgb[3];
-                    if (cJSON_IsString(led1) && parse_hex_color(led1->valuestring, rgb))
-                        for (int i = 0; i < 3; i++) s_test_led1[i] = rgb[i];
-                    if (cJSON_IsString(led5) && parse_hex_color(led5->valuestring, rgb))
-                        for (int i = 0; i < 3; i++) s_test_led5[i] = rgb[i];
                     cJSON *command = cJSON_GetObjectItemCaseSensitive(reply, "command");
                     cJSON *cid = cJSON_GetObjectItemCaseSensitive(command, "id");
                     cJSON *type = cJSON_GetObjectItemCaseSensitive(command, "type");
