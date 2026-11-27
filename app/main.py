@@ -407,7 +407,7 @@ def device_heartbeat(
         "lan_ip": payload.lan_ip,
         "dns_total": payload.dns_total,
         "dns_blocked": payload.dns_blocked,
-        "heartbeat_interval_seconds": 900,
+        "heartbeat_interval_seconds": 60,
         "updated_at": now,
     }
     previous_ip = device.get("public_ip")
