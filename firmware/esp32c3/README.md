@@ -55,7 +55,7 @@ The setup page footer displays **Factory MAC Device ID**. Firmware reads it with
 
 The heartbeat includes Factory MAC Device ID, firmware version, Wi-Fi state, LAN IP and DNS counters. The interval is 900 seconds (15 minutes). If no device token is configured or internet is offline, the firmware does not send a heartbeat; it retries its readiness check after 60 seconds.
 
-The backend stores only a hash of the device token. The raw token is stored in device NVS and sent only in the HTTPS Authorization header. A blocked device is rejected by the API.
+The backend stores only a hash of the device token. The raw token is stored in device NVS. It is submitted to the device over the WPA2-protected local setup AP (the setup page itself uses local HTTP), then sent to the cloud only in the HTTPS Authorization header. A blocked device is rejected by the API.
 
 ### Location accuracy
 
