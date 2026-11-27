@@ -34,7 +34,7 @@ class CustomerRegister(BaseModel):
 
 
 class ClaimInput(BaseModel):
-    device_id: str = Field(min_length=4, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")
+    device_id: str = Field(min_length=4, max_length=64, pattern=r"^(?:[A-Za-z0-9_-]{4,64}|(?:[0-9A-Fa-f]{2}:){5}[0-9A-Fa-f]{2})$")
     claim_token: str = Field(min_length=20, max_length=200)
 
 class DeviceHeartbeat(BaseModel):
