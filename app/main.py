@@ -201,7 +201,7 @@ def review_domains(payload: DomainReviewInput):
     )
     body = json.dumps({"contents":[{"parts":[{"text":prompt}]}],
                        "generationConfig":{"temperature":0.1,"responseMimeType":"application/json"}}).encode()
-    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-3.8-flash:generateContent"
     req = urllib.request.Request(url, data=body, headers={"Content-Type":"application/json", "x-goog-api-key": settings.gemini_api_key}, method="POST")
     try:
         with urllib.request.urlopen(req, timeout=20) as response:
