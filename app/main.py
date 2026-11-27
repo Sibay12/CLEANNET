@@ -239,9 +239,62 @@ def review_domains(payload: DomainReviewInput):
                 confidence = 0.0
             safe.append({"domain": item["domain"], "decision": decision,
                          "confidence": confidence, "reason": str(item.get("reason", ""))[:240]})
-        return {"results": safe, "note": "Review the suggestions before saving the blocklist."}
+        if safe:
+            now = datetime.now(timezone.utc).isoformat()
+            db = get_db()
+            db.domain_reviews.insert_many([
+                {"domain": item["domain"], "decision": item["decision"],
+                 "confidence": item["confidence"], "reason": item["reason"],
+                 "status": "pending", "source": "gemini", "created_at": now}
+                for item in safe
+            ])
+        return {"results": safe, "note": "Gemini suggestions saved to the pending review queue; they are not automatically published."}
     except (urllib.error.URLError, TimeoutError, KeyError, IndexError, ValueError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=502, detail="Gemini review failed: " + str(exc)[:180])
+
+
+@app.get("/api/admin/analytics", dependencies=[Depends(require_admin)])
+def admin_analytics():
+    """Return live database counters separately from the manually supplied baseline test report."""
+    db = get_db()
+    blocklist = db.blocklists.find_one({"_id": "global"}, {"domains": 1, "version": 1, "updated_at": 1}) or {}
+    devices = list(db.devices.find({}, {"dns_total": 1, "dns_blocked": 1}))
+    dns_total = sum(int(d.get("dns_total", 0) or 0) for d in devices)
+    dns_blocked = sum(int(d.get("dns_blocked", 0) or 0) for d in devices)
+    pending_reviews = db.domain_reviews.count_documents({"status": "pending"})
+    return {
+        "baseline": {
+            "source": "user_supplied_photo",
+            "total_tested": 267,
+            "blocked": 20,
+            "accessible": 247,
+            "blocked_rate": 7.5,
+            "categories": [
+                {"name": "Ads", "blocked": 8, "accessible": 78, "total": 86},
+                {"name": "Analytics", "blocked": 1, "accessible": 34, "total": 35},
+                {"name": "Tracking & Fingerprinting", "blocked": 0, "accessible": 19, "total": 19},
+                {"name": "Error & Performance Monitoring", "blocked": 0, "accessible": 4, "total": 4},
+                {"name": "Cryptominers & Malware", "blocked": 2, "accessible": 4, "total": 6},
+                {"name": "Social Trackers", "blocked": 3, "accessible": 27, "total": 30},
+                {"name": "Device & OS Telemetry", "blocked": 5, "accessible": 40, "total": 45},
+                {"name": "Consent Management", "blocked": 0, "accessible": 8, "total": 8},
+                {"name": "Affiliate Networks", "blocked": 0, "accessible": 16, "total": 16},
+                {"name": "A/B Testing", "blocked": 0, "accessible": 3, "total": 3},
+                {"name": "Marketing & Customer Engagement", "blocked": 1, "accessible": 4, "total": 5},
+                {"name": "Video Ads", "blocked": 0, "accessible": 10, "total": 10},
+            ],
+        },
+        "live": {
+            "blocklist_domains": len(blocklist.get("domains", [])),
+            "blocklist_version": int(blocklist.get("version", 0)),
+            "blocklist_updated_at": blocklist.get("updated_at"),
+            "devices_reporting": len(devices),
+            "dns_queries_reported": dns_total,
+            "dns_blocked_reported": dns_blocked,
+            "gemini_review_pending": pending_reviews,
+        },
+        "note": "Baseline photo statistics are historical test results; live counters come from MongoDB device and blocklist records."
+    }
 
 
 @app.get("/ready")
