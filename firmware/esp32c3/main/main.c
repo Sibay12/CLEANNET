@@ -33,6 +33,12 @@
 #include "mbedtls/sha256.h"
 #include "cJSON.h"
 #include "lwip/inet.h"
+#include "nimble/nimble_port.h"
+#include "nimble/nimble_port_freertos.h"
+#include "host/ble_hs.h"
+#include "host/ble_gap.h"
+#include "services/gap/ble_svc_gap.h"
+#include "services/gatt/ble_svc_gatt.h"
 
 #ifndef CONFIG_CLEANNET_UPSTREAM_DNS
 #define CONFIG_CLEANNET_UPSTREAM_DNS "1.1.1.1"
@@ -67,6 +73,7 @@ static volatile led_ota_state_t s_led_ota_state = LED_OTA_IDLE;
 static volatile TickType_t s_pairing_until = 0;
 static volatile bool s_pairing_active = false;
 static httpd_handle_t s_setup_httpd = NULL;
+static volatile bool s_ble_ready = false;
 static volatile bool s_router_connected = false;
 static volatile bool s_internet_available = false;
 static volatile bool s_server_available = false;
@@ -235,23 +242,29 @@ static esp_err_t capabilities_handler(httpd_req_t *req) {
     cJSON_AddStringToObject(root, "device", "CLEANNET-ESP32C3");
     cJSON_AddStringToObject(root, "firmware", DEVICE_VERSION);
     cJSON_AddBoolToObject(root, "ota_supported", true);
-    cJSON_AddBoolToObject(root, "ble_supported_in_build", false);
+    cJSON_AddBoolToObject(root, "ble_supported_in_build", true);
+    cJSON_AddBoolToObject(root, "ble_advertising", s_ble_ready);
     cJSON_AddBoolToObject(root, "pairing_ap_active", s_pairing_active);
     cJSON_AddNumberToObject(root, "pairing_remaining_seconds",
         s_pairing_active && s_pairing_until != 0 &&
         (int32_t)(s_pairing_until - xTaskGetTickCount()) > 0 ?
         (uint32_t)((s_pairing_until - xTaskGetTickCount()) * portTICK_PERIOD_MS / 1000) : 0);
     cJSON *pins = cJSON_AddArrayToObject(root, "gpio");
-    cJSON *led = cJSON_CreateObject();
-    cJSON_AddNumberToObject(led, "gpio", CLEANNET_LED_DATA_GPIO);
-    cJSON_AddStringToObject(led, "role", "addressable_rgb_led_data");
-    cJSON_AddStringToObject(led, "state", "reserved");
-    cJSON_AddItemToArray(pins, led);
-    cJSON *button = cJSON_CreateObject();
-    cJSON_AddNumberToObject(button, "gpio", CLEANNET_PAIR_BUTTON_GPIO);
-    cJSON_AddStringToObject(button, "role", "pair_button_active_low");
-    cJSON_AddStringToObject(button, "state", "reserved_boot_strap_caution");
-    cJSON_AddItemToArray(pins, button);
+    for (int pin = 0; pin <= 21; pin++) {
+        cJSON *item = cJSON_CreateObject();
+        const char *role = "unassigned";
+        const char *state = "board_verification_required";
+        if (pin == CLEANNET_LED_DATA_GPIO) { role = "addressable_rgb_led_data"; state = "reserved"; }
+        else if (pin == CLEANNET_PAIR_BUTTON_GPIO) { role = "pair_button_active_low"; state = "reserved_boot_strap_caution"; }
+        else if (pin >= 12 && pin <= 17) { role = "module_flash_or_unavailable"; state = "do_not_use"; }
+        else if (pin == 18 || pin == 19) { role = "native_usb_possible"; state = "board_verification_required"; }
+        else if (pin == 2 || pin == 8 || pin == 9) { role = "strapping_pin"; state = "do_not_use_without_board_test"; }
+        else if (pin == 20 || pin == 21) { role = "uart_possible"; state = "board_verification_required"; }
+        cJSON_AddNumberToObject(item, "gpio", pin);
+        cJSON_AddStringToObject(item, "role", role);
+        cJSON_AddStringToObject(item, "state", state);
+        cJSON_AddItemToArray(pins, item);
+    }
     cJSON_AddStringToObject(root, "pin_policy",
         "Only board-verified, unreserved GPIOs may be enabled by a future signed OTA configuration. GPIO capabilities vary by board revision.");
     char *body = cJSON_PrintUnformatted(root);
@@ -852,6 +865,43 @@ static void ota_task(void *arg) {
     }
 }
 
+
+static void ble_on_sync(void) {
+    uint8_t addr_type;
+    int rc = ble_hs_id_infer_auto(0, &addr_type);
+    if (rc != 0) { ESP_LOGE(TAG, "BLE address inference failed: %d", rc); return; }
+    struct ble_hs_adv_fields fields;
+    memset(&fields, 0, sizeof(fields));
+    const char *name = "CLEANNET-C3";
+    fields.flags = BLE_HS_ADV_F_DISC_GEN | BLE_HS_ADV_F_BREDR_UNSUP;
+    fields.name = (const uint8_t *)name;
+    fields.name_len = strlen(name);
+    fields.name_is_complete = 1;
+    rc = ble_gap_adv_set_fields(&fields);
+    if (rc != 0) { ESP_LOGE(TAG, "BLE advertising fields failed: %d", rc); return; }
+    struct ble_gap_adv_params params;
+    memset(&params, 0, sizeof(params));
+    params.conn_mode = BLE_GAP_CONN_MODE_UND;
+    params.disc_mode = BLE_GAP_DISC_MODE_GEN;
+    rc = ble_gap_adv_start(addr_type, NULL, BLE_HS_FOREVER, &params, NULL, NULL);
+    if (rc == 0) { s_ble_ready = true; ESP_LOGI(TAG, "BLE advertising: %s", name); }
+    else ESP_LOGE(TAG, "BLE advertising start failed: %d", rc);
+}
+static void ble_host_task(void *param) {
+    (void)param;
+    nimble_port_run();
+    nimble_port_freertos_deinit();
+}
+static void ble_init(void) {
+    esp_err_t err = nimble_port_init();
+    if (err != ESP_OK) { ESP_LOGE(TAG, "NimBLE init failed: %s", esp_err_to_name(err)); return; }
+    ble_svc_gap_init();
+    ble_svc_gatt_init();
+    ble_svc_gap_device_name_set("CLEANNET-C3");
+    ble_hs_cfg.sync_cb = ble_on_sync;
+    nimble_port_freertos_init(ble_host_task);
+}
+
 void app_main(void) {
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
@@ -861,6 +911,7 @@ void app_main(void) {
     esp_err_t ota_state = esp_ota_mark_app_valid_cancel_rollback();
     if (ota_state == ESP_OK) ESP_LOGI(TAG, "OTA image marked valid after boot");
     indicators_init();
+    ble_init();
     pairing_button_init();
     xTaskCreate(indicators_task, "cleannet_leds", 2048, NULL, 2, NULL);
     xTaskCreate(pairing_button_task, "cleannet_pair", 2048, NULL, 2, NULL);
