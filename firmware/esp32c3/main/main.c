@@ -197,7 +197,12 @@ static bool sync_remote_blocklist(void) {
     };
     esp_http_client_handle_t client = esp_http_client_init(&cfg);
     bool ok = false;
-    if (esp_get_free_heap_size() < 50000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 16000) {\n        ESP_LOGW(TAG, "Skipping blocklist sync: insufficient heap headroom");\n        if (s_https_mutex) xSemaphoreGive(s_https_mutex);\n        return false;\n    }\n    char *body = (char *)malloc(4097);
+    if (esp_get_free_heap_size() < 50000 || heap_caps_get_largest_free_block(MALLOC_CAP_8BIT) < 16000) {
+        ESP_LOGW(TAG, "Skipping blocklist sync: insufficient heap headroom");
+        if (s_https_mutex) xSemaphoreGive(s_https_mutex);
+        return false;
+    }
+    char *body = (char *)malloc(4097);
     if (client && body) {
         esp_err_t err = esp_http_client_open(client, 0);
         if (err == ESP_OK) {
