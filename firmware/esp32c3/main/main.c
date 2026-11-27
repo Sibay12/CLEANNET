@@ -227,6 +227,40 @@ static esp_err_t status_json_handler(httpd_req_t *req) {
     free(body); cJSON_Delete(j); return result;
 }
 
+
+static esp_err_t capabilities_handler(httpd_req_t *req) {
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "device", "CLEANNET-ESP32C3");
+    cJSON_AddStringToObject(root, "firmware", DEVICE_VERSION);
+    cJSON_AddBoolToObject(root, "ota_supported", true);
+    cJSON_AddBoolToObject(root, "ble_supported_in_build", false);
+    cJSON_AddBoolToObject(root, "pairing_ap_active", s_pairing_active);
+    cJSON_AddNumberToObject(root, "pairing_remaining_seconds",
+        s_pairing_active && s_pairing_until != 0 &&
+        (int32_t)(s_pairing_until - xTaskGetTickCount()) > 0 ?
+        (uint32_t)((s_pairing_until - xTaskGetTickCount()) * portTICK_PERIOD_MS / 1000) : 0);
+    cJSON *pins = cJSON_AddArrayToObject(root, "gpio");
+    cJSON *led = cJSON_CreateObject();
+    cJSON_AddNumberToObject(led, "gpio", CLEANNET_LED_DATA_GPIO);
+    cJSON_AddStringToObject(led, "role", "addressable_rgb_led_data");
+    cJSON_AddStringToObject(led, "state", "reserved");
+    cJSON_AddItemToArray(pins, led);
+    cJSON *button = cJSON_CreateObject();
+    cJSON_AddNumberToObject(button, "gpio", CLEANNET_PAIR_BUTTON_GPIO);
+    cJSON_AddStringToObject(button, "role", "pair_button_active_low");
+    cJSON_AddStringToObject(button, "state", "reserved_boot_strap_caution");
+    cJSON_AddItemToArray(pins, button);
+    cJSON_AddStringToObject(root, "pin_policy",
+        "Only board-verified, unreserved GPIOs may be enabled by a future signed OTA configuration. GPIO capabilities vary by board revision.");
+    char *body = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_set_hdr(req, "Cache-Control", "no-store");
+    esp_err_t result = httpd_resp_sendstr(req, body ? body : "{}");
+    free(body);
+    cJSON_Delete(root);
+    return result;
+}
+
 static esp_err_t status_page_handler(httpd_req_t *req) {
     static const char page[] =
       "<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>"
@@ -374,6 +408,7 @@ static void start_setup_server(void) {
         {.uri="/", .method=HTTP_GET, .handler=root_handler},
         {.uri="/status", .method=HTTP_GET, .handler=status_page_handler},
         {.uri="/api/status", .method=HTTP_GET, .handler=status_json_handler},
+        {.uri="/api/capabilities", .method=HTTP_GET, .handler=capabilities_handler},
         {.uri="/api/scan", .method=HTTP_GET, .handler=scan_handler},
         {.uri="/api/connect", .method=HTTP_POST, .handler=connect_handler}
     };
