@@ -64,6 +64,7 @@ static volatile uint32_t s_dns_queries_window = 0;
 static led_strip_handle_t s_led_strip = NULL;
 typedef enum { LED_OTA_IDLE = 0, LED_OTA_RECEIVING, LED_OTA_VERIFYING, LED_OTA_INSTALLING, LED_OTA_READY } led_ota_state_t;
 static volatile led_ota_state_t s_led_ota_state = LED_OTA_IDLE;
+static volatile TickType_t s_pairing_until = 0;
 static volatile bool s_router_connected = false;
 static volatile bool s_internet_available = false;
 static volatile bool s_server_available = false;
@@ -457,6 +458,9 @@ static void indicators_task(void *arg) {
         } else if (s_led_ota_state == LED_OTA_INSTALLING) {
             period_ms = 250; phase = !phase;    /* boot partition commit */
             if (phase) b = 255;
+        } else if (s_pairing_until != 0 && (int32_t)(s_pairing_until - xTaskGetTickCount()) > 0) {
+            period_ms = 350; phase = !phase;    /* pairing: purple slow blink */
+            if (phase) { r = 180; b = 255; }
         } else if (elapsed < pdMS_TO_TICKS(3000)) {
             r = 255;                            /* booting: steady red */
         } else if (!s_router_connected || !s_internet_available) {
@@ -473,6 +477,47 @@ static void indicators_task(void *arg) {
         if (s_led_ota_state == LED_OTA_READY) vTaskDelay(pdMS_TO_TICKS(100));
         else vTaskDelay(pdMS_TO_TICKS(period_ms));
     }
+}
+
+
+/* Hold the physical PAIR button for 3 seconds to show pairing mode for 3 minutes.
+ * GPIO0 is a boot-strapping pin on ESP32-C3: do not hold the button while powering on.
+ * The setup AP is already available; this button provides a timed pairing indication. */
+static void pairing_button_task(void *arg) {
+    (void)arg;
+    bool pressed = false;
+    TickType_t pressed_at = 0;
+    while (1) {
+        bool now_pressed = (gpio_get_level(CLEANNET_PAIR_BUTTON_GPIO) == 0);
+        if (now_pressed && !pressed) {
+            pressed = true;
+            pressed_at = xTaskGetTickCount();
+        } else if (!now_pressed && pressed) {
+            pressed = false;
+        }
+        if (pressed && s_pairing_until == 0 &&
+            (xTaskGetTickCount() - pressed_at) >= pdMS_TO_TICKS(3000)) {
+            s_pairing_until = xTaskGetTickCount() + pdMS_TO_TICKS(180000);
+            ESP_LOGI(TAG, "PAIR mode active for 180 seconds (purple LED)");
+        }
+        if (s_pairing_until != 0 &&
+            (int32_t)(xTaskGetTickCount() - s_pairing_until) >= 0) {
+            s_pairing_until = 0;
+            ESP_LOGI(TAG, "PAIR indication timeout; returning to network status");
+        }
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+static void pairing_button_init(void) {
+    gpio_config_t cfg = {
+        .pin_bit_mask = 1ULL << CLEANNET_PAIR_BUTTON_GPIO,
+        .mode = GPIO_MODE_INPUT,
+        .pull_up_en = GPIO_PULLUP_ENABLE,
+        .pull_down_en = GPIO_PULLDOWN_DISABLE,
+        .intr_type = GPIO_INTR_DISABLE,
+    };
+    ESP_ERROR_CHECK(gpio_config(&cfg));
 }
 
 
@@ -757,7 +802,9 @@ void app_main(void) {
     esp_err_t ota_state = esp_ota_mark_app_valid_cancel_rollback();
     if (ota_state == ESP_OK) ESP_LOGI(TAG, "OTA image marked valid after boot");
     indicators_init();
+    pairing_button_init();
     xTaskCreate(indicators_task, "cleannet_leds", 2048, NULL, 2, NULL);
+    xTaskCreate(pairing_button_task, "cleannet_pair", 2048, NULL, 2, NULL);
     xTaskCreate(internet_monitor_task, "cleannet_netcheck", 4096, NULL, 3, NULL);
     xTaskCreate(server_monitor_task, "cleannet_servercheck", 4096, NULL, 2, NULL);
     ESP_LOGI(TAG, "CLEANNET %s booting; upstream DNS %s; blocklist %u entries",
