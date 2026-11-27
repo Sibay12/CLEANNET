@@ -60,11 +60,15 @@
 #ifndef CONFIG_CLEANNET_BLOCKLIST_URL
 #define CONFIG_CLEANNET_BLOCKLIST_URL "https://cleannet-api-qkv4.onrender.com/api/blocklist?since=0"
 #endif
+#ifndef CONFIG_CLEANNET_HEARTBEAT_URL
+#define CONFIG_CLEANNET_HEARTBEAT_URL "https://cleannet-api-qkv4.onrender.com/api/device/heartbeat"
+#endif
+#define CLEANNET_HEARTBEAT_SECONDS 900
 
 #define DNS_PORT 53
 #define DNS_PACKET_MAX 512
 #define WIFI_NAMESPACE "cleannet"
-#define DEVICE_VERSION "0.2.8"
+#define DEVICE_VERSION "0.2.9"
 #define OTA_BUFFER_SIZE 2048
 
 static const char *TAG = "CLEANNET";
@@ -72,6 +76,8 @@ static EventGroupHandle_t s_wifi_events;
 static SemaphoreHandle_t s_https_mutex;
 static bool s_dns_started = false;
 static bool s_ota_started = false;
+static bool s_heartbeat_started = false;
+static char s_device_token[201] = {0};
 
 /* Capture heap headroom around HTTPS/TLS operations for OTA diagnostics. */
 static void log_ota_heap(const char *stage) {
@@ -428,6 +434,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "<section class='card'><h2>Connect to your router</h2><p>Choose your home network and enter its Wi-Fi password. Your credentials are saved on this device.</p>"
         "<div class='actions'><button class='primary' id='scanBtn' onclick='scan()'>⌕ &nbsp; Scan Wi-Fi networks</button></div>"
         "<div class='field'><label for='nets'>Nearby networks</label><select id='nets'><option value=''>Scan to find networks</option></select></div>"
+        "<div class='field'><label for='deviceToken'>Cloud Device Token (optional)</label><input id='deviceToken' type='password' maxlength='200' autocomplete='off' placeholder='Paste the one-time device token from Admin Panel'><div class='hint'>Required for cloud heartbeat and approximate location. It is stored on this device and sent only over HTTPS.</div></div>"
         "<div class='field'><label for='ssid'>Wi-Fi name (SSID)</label><input id='ssid' maxlength='32' autocomplete='off' placeholder='Enter Wi-Fi name'></div>"
         "<div class='field'><label for='pw'>Wi-Fi password</label><div class='passwordRow'><input id='pw' type='password' maxlength='64' autocomplete='new-password' placeholder='Enter Wi-Fi password'><button type='button' onclick='togglePassword()'>Show</button></div><div class='hint'>Your Wi-Fi password is sent only to this CLEANNET device over its local setup connection.</div></div>"
         "<button class='primary' id='connectBtn' style='width:100%' onclick='connectNet()'>Save &amp; Connect</button><div id='msg' class='status' role='status' aria-live='polite'>Ready. Scan for nearby Wi-Fi networks to begin.</div></section>"
@@ -438,7 +445,7 @@ static esp_err_t root_handler(httpd_req_t *req) {
         "async function scan(){const b=$('scanBtn'),m=$('msg'),s=$('nets');b.disabled=true;b.textContent='Scanning…';m.textContent='Searching for nearby networks…';try{const r=await fetch('/api/scan',{cache:'no-store'});if(!r.ok)throw new Error('HTTP '+r.status);const j=await r.json();s.innerHTML='<option value=\"\">Select a Wi-Fi network</option>';j.networks.forEach(n=>{const o=document.createElement('option');o.value=n.ssid;o.textContent=n.ssid+' · '+n.rssi+' dBm'+(n.secure?' · secured':' · open');s.appendChild(o)});m.textContent=j.networks.length+' network(s) found. Select your router.'}catch(e){m.textContent='Scan failed: '+e.message}finally{b.disabled=false;b.textContent='⌕  Scan Wi-Fi networks'}}"
         "$('nets').addEventListener('change',e=>{if(e.target.value)$('ssid').value=e.target.value});"
         "function togglePassword(){const p=$('pw'),b=p.nextElementSibling;p.type=p.type==='password'?'text':'password';b.textContent=p.type==='password'?'Show':'Hide'}"
-        "let latestDnsIp='';function closeResult(){$('resultModal').classList.remove('show')}async function copyDnsIp(){if(!latestDnsIp)return;try{await navigator.clipboard.writeText(latestDnsIp);$('resultSummary').textContent='DNS Server IP copied: '+latestDnsIp}catch(e){$('resultSummary').textContent='Copy unavailable; DNS IP: '+latestDnsIp}}function showConnection(s){latestDnsIp=s.ip;const fields=[['Factory MAC Device ID',s.device_id||s.factory_mac],['Wi-Fi status',s.wifi],['CLEANNET DNS Server / Primary DNS IP',s.ip],['Wi-Fi MAC Address (router-facing)',s.mac],['Router Gateway',s.gateway],['Subnet Mask',s.subnet],['Router DHCP DNS',s.dhcp_dns],['Internet',s.internet],['CLEANNET Server',s.server],['DNS Service',s.dns_service]];$('resultDetails').innerHTML=fields.map(x=>'<div class=iprow><b>'+x[0]+'</b>'+String(x[1]||'Unavailable')+'</div>').join('');$('resultModal').classList.add('show');$('resultSummary').textContent='Connection confirmed. Set CLEANNET DNS Server IP as Primary DNS in Jio AirFiber LAN/DHCP settings.'}async function waitForConnection(){const m=$('msg'),started=Date.now();while(Date.now()-started<60000){await new Promise(resolve=>setTimeout(resolve,1500));try{const r=await fetch('/api/status',{cache:'no-store'});if(r.ok){const s=await r.json();if(s.wifi==='Connected'&&s.ip&&s.ip!=='0.0.0.0'){m.textContent='Connected! CLEANNET LAN IP: '+s.ip;showConnection(s);return}}}catch(e){}m.textContent='Waiting for router connection and IP address…'}m.textContent='Credentials saved, but connection is not confirmed yet. Check Wi-Fi/password and open /status.'}async function connectNet(){const b=$('connectBtn'),m=$('msg'),ssid=$('ssid').value.trim(),password=$('pw').value;if(!ssid){m.textContent='Please enter or select your Wi-Fi name.';return}b.disabled=true;b.textContent='Connecting…';m.textContent='Saving Wi-Fi details and connecting to your router…';try{const r=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password})});const j=await r.json();if(!r.ok)throw new Error(j.detail||'Connection request failed');m.textContent='Credentials saved. Waiting for connection and IP…';await waitForConnection()}catch(e){m.textContent='Could not connect: '+e.message}finally{b.disabled=false;b.textContent='Save & Connect'}}"
+        "let latestDnsIp='';function closeResult(){$('resultModal').classList.remove('show')}async function copyDnsIp(){if(!latestDnsIp)return;try{await navigator.clipboard.writeText(latestDnsIp);$('resultSummary').textContent='DNS Server IP copied: '+latestDnsIp}catch(e){$('resultSummary').textContent='Copy unavailable; DNS IP: '+latestDnsIp}}function showConnection(s){latestDnsIp=s.ip;const fields=[['Factory MAC Device ID',s.device_id||s.factory_mac],['Wi-Fi status',s.wifi],['CLEANNET DNS Server / Primary DNS IP',s.ip],['Wi-Fi MAC Address (router-facing)',s.mac],['Router Gateway',s.gateway],['Subnet Mask',s.subnet],['Router DHCP DNS',s.dhcp_dns],['Internet',s.internet],['CLEANNET Server',s.server],['DNS Service',s.dns_service]];$('resultDetails').innerHTML=fields.map(x=>'<div class=iprow><b>'+x[0]+'</b>'+String(x[1]||'Unavailable')+'</div>').join('');$('resultModal').classList.add('show');$('resultSummary').textContent='Connection confirmed. Set CLEANNET DNS Server IP as Primary DNS in Jio AirFiber LAN/DHCP settings.'}async function waitForConnection(){const m=$('msg'),started=Date.now();while(Date.now()-started<60000){await new Promise(resolve=>setTimeout(resolve,1500));try{const r=await fetch('/api/status',{cache:'no-store'});if(r.ok){const s=await r.json();if(s.wifi==='Connected'&&s.ip&&s.ip!=='0.0.0.0'){m.textContent='Connected! CLEANNET LAN IP: '+s.ip;showConnection(s);return}}}catch(e){}m.textContent='Waiting for router connection and IP address…'}m.textContent='Credentials saved, but connection is not confirmed yet. Check Wi-Fi/password and open /status.'}async function connectNet(){const b=$('connectBtn'),m=$('msg'),ssid=$('ssid').value.trim(),password=$('pw').value;if(!ssid){m.textContent='Please enter or select your Wi-Fi name.';return}b.disabled=true;b.textContent='Connecting…';m.textContent='Saving Wi-Fi details and connecting to your router…';try{const r=await fetch('/api/connect',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({ssid,password,device_token:$('deviceToken').value.trim()})});const j=await r.json();if(!r.ok)throw new Error(j.detail||'Connection request failed');$('deviceToken').value='';m.textContent='Credentials saved. Waiting for connection and IP…';await waitForConnection()}catch(e){m.textContent='Could not connect: '+e.message}finally{b.disabled=false;b.textContent='Save & Connect'}}"
         "</script></body></html>";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     httpd_resp_set_hdr(req, "Cache-Control", "no-store");
@@ -479,14 +486,20 @@ static esp_err_t connect_handler(httpd_req_t *req) {
     cJSON *json = cJSON_ParseWithLength(body, received);
     const cJSON *ssid = cJSON_GetObjectItemCaseSensitive(json, "ssid");
     const cJSON *password = cJSON_GetObjectItemCaseSensitive(json, "password");
+    const cJSON *device_token = cJSON_GetObjectItemCaseSensitive(json, "device_token");
     if (!cJSON_IsString(ssid) || !cJSON_IsString(password) || strlen(ssid->valuestring) == 0 ||
-        strlen(ssid->valuestring) > 32 || strlen(password->valuestring) > 64) {
+        strlen(ssid->valuestring) > 32 || strlen(password->valuestring) > 64 ||
+        (device_token && (!cJSON_IsString(device_token) ||
+            (strlen(device_token->valuestring) != 0 && strlen(device_token->valuestring) < 20) ||
+            strlen(device_token->valuestring) > 200))) {
         cJSON_Delete(json); return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "SSID/password invalid");
     }
     nvs_handle_t nvs; esp_err_t err = nvs_open(WIFI_NAMESPACE, NVS_READWRITE, &nvs);
     if (err == ESP_OK) {
         err = nvs_set_str(nvs, "ssid", ssid->valuestring);
         if (err == ESP_OK) err = nvs_set_str(nvs, "password", password->valuestring);
+        if (err == ESP_OK && device_token && strlen(device_token->valuestring) >= 20)
+            err = nvs_set_str(nvs, "device_token", device_token->valuestring);
         if (err == ESP_OK) err = nvs_commit(nvs);
         nvs_close(nvs);
     }
@@ -594,6 +607,15 @@ static bool load_wifi_credentials(wifi_config_t *cfg) {
     cfg->sta.threshold.authmode = WIFI_AUTH_OPEN;
     cfg->sta.pmf_cfg.capable = true; cfg->sta.pmf_cfg.required = false;
     return a == ESP_OK && b == ESP_OK && cfg->sta.ssid[0] != 0;
+}
+
+static void load_device_token(void) {
+    nvs_handle_t nvs;
+    size_t length = sizeof(s_device_token);
+    if (nvs_open(WIFI_NAMESPACE, NVS_READONLY, &nvs) != ESP_OK) return;
+    if (nvs_get_str(nvs, "device_token", s_device_token, &length) != ESP_OK)
+        s_device_token[0] = '\0';
+    nvs_close(nvs);
 }
 
 static void ota_task(void *arg);
@@ -708,6 +730,81 @@ static void pairing_button_init(void) {
 }
 
 
+static bool send_device_heartbeat(void) {
+    if (!s_device_token[0] || !s_router_connected || !s_internet_available) return false;
+    if (s_https_mutex) xSemaphoreTake(s_https_mutex, portMAX_DELAY);
+
+    uint8_t factory_mac[6] = {0};
+    char device_id[18] = "unavailable";
+    if (esp_read_mac(factory_mac, ESP_MAC_WIFI_STA) == ESP_OK)
+        snprintf(device_id, sizeof(device_id), "%02X:%02X:%02X:%02X:%02X:%02X",
+            factory_mac[0], factory_mac[1], factory_mac[2],
+            factory_mac[3], factory_mac[4], factory_mac[5]);
+
+    char lan_ip[16] = "0.0.0.0";
+    esp_netif_t *sta = esp_netif_get_handle_from_ifkey("WIFI_STA_DEF");
+    esp_netif_ip_info_t ip_info = {0};
+    if (sta && esp_netif_get_ip_info(sta, &ip_info) == ESP_OK && ip_info.ip.addr)
+        snprintf(lan_ip, sizeof(lan_ip), IPSTR, IP2STR(&ip_info.ip));
+
+    cJSON *root = cJSON_CreateObject();
+    if (!root) {
+        if (s_https_mutex) xSemaphoreGive(s_https_mutex);
+        return false;
+    }
+    cJSON_AddStringToObject(root, "device_id", device_id);
+    cJSON_AddStringToObject(root, "firmware", DEVICE_VERSION);
+    cJSON_AddStringToObject(root, "wifi", s_router_connected ? "Connected" : "Disconnected");
+    cJSON_AddStringToObject(root, "lan_ip", lan_ip);
+    cJSON_AddNumberToObject(root, "dns_total", s_dns_total);
+    cJSON_AddNumberToObject(root, "dns_blocked", s_dns_blocked);
+    char *body = cJSON_PrintUnformatted(root);
+    cJSON_Delete(root);
+    if (!body) {
+        if (s_https_mutex) xSemaphoreGive(s_https_mutex);
+        return false;
+    }
+
+    esp_http_client_config_t cfg = {
+        .url = CONFIG_CLEANNET_HEARTBEAT_URL,
+        .timeout_ms = 12000,
+        .crt_bundle_attach = esp_crt_bundle_attach,
+        .buffer_size = 512
+    };
+    esp_http_client_handle_t client = esp_http_client_init(&cfg);
+    bool ok = false;
+    if (client) {
+        char authorization[208];
+        snprintf(authorization, sizeof(authorization), "Bearer %s", s_device_token);
+        esp_http_client_set_method(client, HTTP_METHOD_POST);
+        esp_http_client_set_header(client, "Content-Type", "application/json");
+        esp_http_client_set_header(client, "Authorization", authorization);
+        esp_http_client_set_post_field(client, body, (int)strlen(body));
+        esp_err_t err = esp_http_client_perform(client);
+        int status = esp_http_client_get_status_code(client);
+        ok = (err == ESP_OK && status == 200);
+        if (ok) ESP_LOGI(TAG, "Cloud heartbeat accepted for %s", device_id);
+        else ESP_LOGW(TAG, "Cloud heartbeat failed: %s HTTP %d", esp_err_to_name(err), status);
+        esp_http_client_cleanup(client);
+    }
+    free(body);
+    if (s_https_mutex) xSemaphoreGive(s_https_mutex);
+    return ok;
+}
+
+static void device_heartbeat_task(void *arg) {
+    (void)arg;
+    vTaskDelay(pdMS_TO_TICKS(30000));
+    while (1) {
+        if (s_router_connected && s_internet_available && s_device_token[0]) {
+            send_device_heartbeat();
+            vTaskDelay(pdMS_TO_TICKS(CLEANNET_HEARTBEAT_SECONDS * 1000ULL));
+        } else {
+            vTaskDelay(pdMS_TO_TICKS(60000));
+        }
+    }
+}
+
 static void server_monitor_task(void *arg) {
     (void)arg;
     while (1) {
@@ -788,6 +885,11 @@ static void wifi_event_handler(void *arg, esp_event_base_t base, int32_t id, voi
             BaseType_t ota_task_created = xTaskCreate(ota_task, "cleannet_ota", 8192, NULL, 4, NULL);
             if (ota_task_created == pdPASS) s_ota_started = true;
             else ESP_LOGE(TAG, "Could not create OTA task");
+        }
+        if (!s_heartbeat_started) {
+            BaseType_t heartbeat_created = xTaskCreate(device_heartbeat_task, "cleannet_heartbeat", 6144, NULL, 3, NULL);
+            if (heartbeat_created == pdPASS) s_heartbeat_started = true;
+            else ESP_LOGE(TAG, "Could not create device heartbeat task");
         }
     }
 }
@@ -1037,6 +1139,7 @@ void app_main(void) {
         ESP_ERROR_CHECK(nvs_flash_erase()); ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    load_device_token();
     esp_err_t ota_state = esp_ota_mark_app_valid_cancel_rollback();
     if (ota_state == ESP_OK) ESP_LOGI(TAG, "OTA image marked valid after boot");
     s_https_mutex = xSemaphoreCreateMutex();
